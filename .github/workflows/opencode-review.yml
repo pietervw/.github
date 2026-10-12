@@ -1,0 +1,38 @@
+name: OpenCode review (reusable)
+
+# Call from a repo with a thin caller, see the root README. All guards live here
+# so every repo gets the same behaviour from one place.
+on:
+  workflow_call:
+    inputs:
+      model:
+        type: string
+        default: zai-coding-plan/glm-5.3
+    secrets:
+      ZHIPU_API_KEY:
+        required: true
+
+jobs:
+  review:
+    # Skip drafts, fork PRs (no secrets, untrusted code) and Dependabot (its
+    # runs cannot read Actions secrets).
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    # Includes the runner's CI slot wait and the capacity wait.
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pietervw/.github/.github/actions/opencode-review@v1
+        with:
+          api-key: ${{ secrets.ZHIPU_API_KEY }}
+          model: ${{ inputs.model }}

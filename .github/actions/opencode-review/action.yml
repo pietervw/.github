@@ -1,0 +1,102 @@
+name: OpenCode PR review
+description: >-
+  Read-only OpenCode review of the checked-out pull request. Waits for host capacity,
+  then posts one updatable summary comment plus inline comments. Never approves,
+  merges, or pushes. Caller must check out the PR head with fetch-depth 0 first.
+
+inputs:
+  api-key:
+    description: z.ai coding plan key (ZHIPU_API_KEY). Pass a repository secret; never commit it.
+    required: true
+  model:
+    description: Model in provider/id form
+    required: false
+    default: zai-coding-plan/glm-5.3
+  prompt-file:
+    description: Review prompt. Defaults to the prompt shipped with this action.
+    required: false
+    default: ""
+  max-concurrent:
+    description: Reviews allowed at once on one host
+    required: false
+    default: "1"
+  wait-seconds:
+    description: How long to wait for host capacity before skipping with a notice
+    required: false
+    default: "600"
+  github-token:
+    description: Token used only to post the review (pull-requests write)
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Ensure OpenCode CLI
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        bin_dir="${HOME}/.opencode/bin"
+        export PATH="${bin_dir}:${PATH}"
+        current="$(opencode --version 2>/dev/null || true)"
+        current="${current#v}"
+        latest="$(curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" \
+          https://api.github.com/repos/anomalyco/opencode/releases/latest \
+          | grep -o '"tag_name": *"[^"]*"' | head -n1 | cut -d'"' -f4 || true)"
+        latest="${latest#v}"
+        if [ -z "${current}" ] || { [ -n "${latest}" ] && [ "${current}" != "${latest}" ]; }; then
+          echo "OpenCode CLI ${current:-missing} -> ${latest:-latest}"
+          curl -fsSL https://opencode.ai/install | bash
+        fi
+        echo "${bin_dir}" >> "${GITHUB_PATH}"
+
+    # No GITHUB_TOKEN in this step's environment: the model can read the repo but
+    # has no credentials to act on it. Results are posted by the next step.
+    - name: Run review
+      id: run
+      shell: bash
+      env:
+        ZHIPU_API_KEY: ${{ inputs.api-key }}
+        REVIEW_MODEL: ${{ inputs.model }}
+        REVIEW_PROMPT_FILE: ${{ inputs.prompt-file || format('{0}/review-prompt.md', github.action_path) }}
+        REVIEW_OUT_DIR: ${{ runner.temp }}/opencode-review
+        REVIEW_MAX_CONCURRENT: ${{ inputs.max-concurrent }}
+        REVIEW_WAIT_SEC: ${{ inputs.wait-seconds }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        PR_TITLE: ${{ github.event.pull_request.title }}
+        PR_BODY: ${{ github.event.pull_request.body }}
+      run: bash "${GITHUB_ACTION_PATH}/scripts/run-review.sh"
+
+    - name: Post review
+      if: ${{ always() && steps.run.conclusion != 'skipped' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RUN_OUTCOME: ${{ steps.run.outcome }}
+        RUN_STATUS: ${{ steps.run.outputs.status }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REVIEW_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+        out_dir="${RUNNER_TEMP}/opencode-review"
+        status="${RUN_STATUS:-failed}"
+        reason=""
+        if [ -f "${out_dir}/status.json" ]; then
+          reason="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("reason",""))' "${out_dir}/status.json" 2>/dev/null)" || reason=""
+        fi
+        # Superseded or timed-out runs say nothing; the Actions UI shows the cancel.
+        if [ "${RUN_OUTCOME}" = "cancelled" ]; then
+          echo "Review run was cancelled; not posting."
+          exit 0
+        fi
+        [ "${RUN_OUTCOME}" = "success" ] || { status="failed"; reason="${reason:-the review step failed before producing a result}"; }
+        python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
+          --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
+          --sha "${PR_HEAD_SHA}" --model "${REVIEW_MODEL}" \
+          --status "${status}" --reason "${reason}" --out-dir "${out_dir}" \
+          --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
