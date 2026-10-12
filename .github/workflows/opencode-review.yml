@@ -21,8 +21,8 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
-    # Includes the runner's CI slot wait and the capacity wait.
-    timeout-minutes: 40
+    # Includes the runner's CI slot wait (jobs queue behind one host-wide slot) and the capacity wait.
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
