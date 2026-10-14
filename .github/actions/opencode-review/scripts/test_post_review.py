@@ -3,7 +3,9 @@ import argparse
 import json
 import os
 import tempfile
+import subprocess
 import unittest
+from unittest import mock
 
 import post_review as pr
 
@@ -99,6 +101,36 @@ class PostingTests(unittest.TestCase):
         gh = FakeGitHub()
         pr.post_inline(gh, self.args, pr.clean_findings({"findings": [finding(line=99)]}), [{"filename": "src/a.ts", "patch": PATCH}])
         self.assertEqual(gh.writes, [])
+
+
+class PaginationTests(unittest.TestCase):
+    def test_parse_pages_flattens_concatenated_arrays(self):
+        self.assertEqual(pr.parse_pages('[{"id": 1}, {"id": 2}][{"id": 3}]'), [{"id": 1}, {"id": 2}, {"id": 3}])
+        self.assertEqual(pr.parse_pages('[1,2]\n[3]\n'), [1, 2, 3])
+        self.assertEqual(pr.parse_pages('[]'), [])
+        self.assertEqual(pr.parse_pages(''), [])
+        self.assertEqual(pr.parse_pages(' \n'), [])
+
+    def test_parse_pages_rejects_non_array_pages(self):
+        with self.assertRaises(ValueError):
+            pr.parse_pages('{"message": "nope"}')
+
+    def run_get(self, stdout, paginate):
+        done = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with mock.patch.object(pr.subprocess, "run", return_value=done) as run:
+            result = pr.GitHub("o/r").get("pulls/7/files", paginate=paginate)
+        return result, run.call_args.args[0]
+
+    def test_paginated_get_avoids_slurp_flag(self):
+        result, cmd = self.run_get('[{"a": 1}][{"a": 2}]', paginate=True)
+        self.assertEqual(result, [{"a": 1}, {"a": 2}])
+        self.assertIn("--paginate", cmd)
+        self.assertNotIn("--slurp", cmd)
+
+    def test_unpaginated_get_returns_object(self):
+        result, cmd = self.run_get('{"state": "open"}', paginate=False)
+        self.assertEqual(result, {"state": "open"})
+        self.assertNotIn("--paginate", cmd)
 
 
 class SummaryTests(unittest.TestCase):
