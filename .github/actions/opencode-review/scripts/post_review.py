@@ -173,6 +173,24 @@ def render_summary(args, status, reason, review, findings, raw_text):
     return "\n".join(head + body + foot)
 
 
+def parse_pages(text):
+    """Flatten the output of `gh api --paginate`: one JSON array per page, concatenated.
+
+    Parsed here instead of using `--slurp`, which older gh releases (self-hosted runners) reject.
+    """
+    decoder = json.JSONDecoder()
+    items, pos = [], 0
+    while True:
+        while pos < len(text) and text[pos].isspace():
+            pos += 1
+        if pos >= len(text):
+            return items
+        page, pos = decoder.raw_decode(text, pos)
+        if not isinstance(page, list):
+            raise ValueError(f"expected a JSON array per page, got {type(page).__name__}")
+        items.extend(page)
+
+
 class GitHub:
     def __init__(self, repo):
         self.repo = repo
@@ -180,17 +198,16 @@ class GitHub:
     def _run(self, method, path, payload=None, paginate=False):
         cmd = ["gh", "api", "--method", method, f"repos/{self.repo}/{path}"]
         if paginate:
-            cmd += ["--paginate", "--slurp"]
+            cmd += ["--paginate"]
         if payload is not None:
             cmd += ["--input", "-"]
         proc = subprocess.run(cmd, input=json.dumps(payload) if payload is not None else None,
                               capture_output=True, text=True, check=False)
         if proc.returncode != 0:
             raise RuntimeError(f"gh api {method} {path} failed: {proc.stderr.strip() or proc.stdout.strip()}")
-        data = json.loads(proc.stdout) if proc.stdout.strip() else None
         if paginate:
-            return [item for page in data for item in page]
-        return data
+            return parse_pages(proc.stdout)
+        return json.loads(proc.stdout) if proc.stdout.strip() else None
 
     def get(self, path, paginate=False):
         return self._run("GET", path, paginate=paginate)
