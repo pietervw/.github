@@ -39,11 +39,12 @@ IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
 than this are retried — a full 720 s timeout is not, to free the CI slot),
 `REVIEW_LOCK_DIR` (`/tmp`).
 
-Total time is bounded: the capacity wait (`wait-seconds`, 600) plus at most
-one full run timeout (720) plus one quick retry (< 180 + 30 backoff) stays
-under the 2100 s runner watchdog and the 90-minute job timeout, which
-includes queueing for the runner's single CI slot (that queue, not the run,
-is what produced the 5700 s worst-case check in the 2026-10-28 retro).
+Total time is bounded: the capacity wait (`wait-seconds`, 600) plus a quick
+failed attempt (< 180) + backoff (30) plus one full run timeout (720 + up to
+30 s kill-after grace) on the final attempt is ≈ 1560 s — under the 2100 s
+runner watchdog and the 90-minute job timeout, which includes queueing for
+the runner's single CI slot (that queue, not the run, is what produced the
+5700 s worst-case check in the 2026-10-28 retro).
 
 ## Tests
 

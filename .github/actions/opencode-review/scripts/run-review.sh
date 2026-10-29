@@ -6,10 +6,10 @@
 # caps reviews specifically). If the host stays busy for REVIEW_WAIT_SEC the
 # review is skipped with a notice instead of overloading it.
 #
-# A run that dies quickly (under REVIEW_RETRY_IF_DIED_UNDER_SEC) is retried up
-# to REVIEW_ATTEMPTS times with backoff; the failure reason (stderr tail, or
-# the last event line when stderr is empty) is persisted to status.json so the
-# posted summary says why the review failed.
+# A run that dies quickly (under REVIEW_RETRY_IF_DIED_UNDER_SEC) gets up to
+# REVIEW_ATTEMPTS total attempts with backoff; the failure reason (stderr tail,
+# or the last event line when stderr is empty) is persisted to status.json so
+# the posted summary says why the review failed.
 #
 # This step never sees GITHUB_TOKEN: posting is a separate step.
 #
@@ -34,7 +34,13 @@ mkdir -p "$REVIEW_OUT_DIR"
 export PATH="${HOME}/.opencode/bin:${PATH}"
 
 write_status() { # status reason
-  printf '{"status":"%s","reason":"%s"}\n' "$1" "${2//\"/\'}" > "${REVIEW_OUT_DIR}/status.json"
+  # python does the JSON encoding: the reason carries untrusted provider/model
+  # output (backslashes, control chars, bytes cut mid-UTF-8 by the fallback
+  # trim) that printf-style escaping cannot make valid JSON.
+  python3 - "$1" "$2" <<'PY' > "${REVIEW_OUT_DIR}/status.json"
+import json, sys
+print(json.dumps({"status": sys.argv[1], "reason": sys.argv[2]}))
+PY
   echo "status=$1" >> "${GITHUB_OUTPUT:-/dev/null}"
 }
 
@@ -69,6 +75,14 @@ try_lock() {
   done
   return 1
 }
+
+# Guard before anything runs: an empty loop would otherwise report status=ran
+# with no review at all.
+if ! [[ "${ATTEMPTS}" =~ ^[0-9]+$ ]] || (( ATTEMPTS < 1 )); then
+  echo "::error::REVIEW_ATTEMPTS='${ATTEMPTS}' must be an integer >= 1"
+  write_status failed "REVIEW_ATTEMPTS='${ATTEMPTS}' must be an integer >= 1"
+  exit 1
+fi
 
 deadline=$(( SECONDS + WAIT_SEC ))
 reason=""
@@ -162,12 +176,14 @@ while (( attempt <= ATTEMPTS )); do
   set -e
   elapsed=$(( SECONDS - started ))
   if (( rc == 0 )); then break; fi
-  echo "::error::$(failure_detail "$rc" "$elapsed")" >&2
-  tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
   if (( attempt < ATTEMPTS && elapsed < RETRY_IF_DIED_UNDER_SEC )); then
+    echo "::warning::$(failure_detail "$rc" "$elapsed"); retrying" >&2
+    tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
     attempt=$(( attempt + 1 ))
     continue
   fi
+  echo "::error::$(failure_detail "$rc" "$elapsed")" >&2
+  tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
   break
 done
 
