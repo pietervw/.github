@@ -18,6 +18,10 @@ Read-only, automatic review of ready-for-review pull requests, run by OpenCode
    summary comment edited in place on every run, plus a single `COMMENT` review
    holding inline comments for new findings that land on diff lines. It never
    approves, requests changes, merges, or pushes.
+5. The summary carries a hidden machine-readable result,
+   `<!-- opencode-review:result sha=<head> clean=0|1 -->`. `clean=1` means the review
+   ran, the verdict is `no_issues` and there are no P0-P2 findings. The automerge gate
+   reads it; the "review / review" check itself still passes regardless of findings.
 
 `review-prompt.md` is the reusable review prompt (credits to Codex and Claude
 Code guidance are in the file).

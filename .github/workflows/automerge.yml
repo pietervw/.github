@@ -1,0 +1,52 @@
+name: Automerge gate (reusable)
+
+# Opt-in auto-merge for low-risk repos (marketing sites). See the root README for the caller.
+# Nothing from the PR is checked out or executed: the gate script comes from the central tag and
+# only reads PR metadata, so the PR cannot change what decides its own merge.
+on:
+  workflow_call:
+    inputs:
+      label:
+        type: string
+        default: automerge
+      allow-globs:
+        type: string
+        default: ""
+      merge-method:
+        type: string
+        default: squash
+      dry-run:
+        type: boolean
+        default: false
+    secrets:
+      MERGE_TOKEN:
+        required: true
+
+jobs:
+  gate:
+    runs-on: ${{ vars.RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    # Read access only to download the central action; merging uses MERGE_TOKEN.
+    permissions:
+      contents: read
+    steps:
+      # pull_request_target (labeled) carries the PR; workflow_run (CI / review finished) lists it.
+      - name: Find PR
+        id: pr
+        shell: bash
+        env:
+          FROM_PR: ${{ github.event.pull_request.number }}
+          FROM_RUN: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          number="${FROM_PR:-${FROM_RUN:-}}"
+          echo "number=${number}" >> "${GITHUB_OUTPUT}"
+          [ -n "${number}" ] || echo "No pull request on this event; nothing to do."
+      - if: steps.pr.outputs.number != ''
+        uses: pietervw/.github/.github/actions/automerge-gate@v1
+        with:
+          token: ${{ secrets.MERGE_TOKEN }}
+          pr-number: ${{ steps.pr.outputs.number }}
+          label: ${{ inputs.label }}
+          allow-globs: ${{ inputs.allow-globs }}
+          merge-method: ${{ inputs.merge-method }}
+          dry-run: ${{ inputs.dry-run }}
