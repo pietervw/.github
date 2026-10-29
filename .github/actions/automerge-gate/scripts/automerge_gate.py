@@ -121,7 +121,7 @@ class GitHub:
 
     def api(self, args, payload=None):
         proc = subprocess.run(["gh", "api", *args], input=json.dumps(payload) if payload is not None else None,
-                              capture_output=True, text=True, check=False)
+                              capture_output=True, text=True, encoding="utf-8", check=False)
         if proc.returncode != 0:
             raise RuntimeError(f"gh api {' '.join(args)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
         return json.loads(proc.stdout) if proc.stdout.strip() else None
@@ -188,7 +188,7 @@ def main():
         write_summary([f"### Automerge gate: PR #{args.pr} would merge (head `{sha[:7]}`, dry run)"])
         return 0
     proc = subprocess.run(["gh", "pr", "merge", str(args.pr), "--repo", args.repo, f"--{args.merge_method}",
-                           "--match-head-commit", sha], capture_output=True, text=True, check=False)
+                           "--match-head-commit", sha], capture_output=True, text=True, encoding="utf-8", check=False)
     if proc.returncode != 0:
         write_summary([f"### Automerge gate: PR #{args.pr} passed the gates but the merge failed", "", "```",
                        (proc.stderr or proc.stdout).strip()[:1500], "```"])
