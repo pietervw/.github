@@ -41,6 +41,18 @@ jobs:
       ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
 ```
 
+3. Optional: cap how many times the bot auto-reviews one PR (default 3; a round
+   is one completed review — busy/failed runs do not consume it). When the cap
+   is reached the summary comment says so instead of re-running on every push:
+
+```yaml
+    with:
+      max-rounds: "5"   # or "0" for unlimited
+```
+
+The cap applies to the automatic on-push review only; a requested
+`@opencode review` still runs.
+
 ### Releasing a change
 
 `v1` is a moving tag. Change this repo through a PR, then move the tag

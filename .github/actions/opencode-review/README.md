@@ -22,6 +22,24 @@ Read-only, automatic review of ready-for-review pull requests, run by OpenCode
 `review-prompt.md` is the reusable review prompt (credits to Codex and Claude
 Code guidance are in the file).
 
+## Review round cap
+
+Bots re-reviewing every push is the dominant PR-time cost (41 of 64 PRs in the
+2026-10-28 retro needed ≥2 push rounds). The action therefore stops
+auto-reviewing a PR after `max-rounds` completed rounds (default 3) and says so
+in the summary comment, including how to get another review (`@opencode review`,
+re-run, or raise `max-rounds`).
+
+- A round is counted when a review run completes and posts (`status=ran`),
+  whether or not the model output parsed. Busy, failed, and capped posts do not
+  consume a round.
+- The counter lives in the summary comment (`<!-- opencode-review:round=N -->`),
+  so it is per-PR, survives runner/workflow changes, and needs no extra state.
+- The pre-review cap check fails open: if the comments API is unreachable the
+  review runs anyway.
+- `max-rounds: "0"` disables the cap. Callers override it via the reusable
+  workflow's `max-rounds` input.
+
 ## Using it
 
 Repos call the reusable workflow `.github/workflows/opencode-review.yml` in this
@@ -30,7 +48,7 @@ repo; see the root README for the caller and the rollout requirements
 
 ## Tuning
 
-Inputs: `model`, `prompt-file`, `max-concurrent`, `wait-seconds`. Host gate
+Inputs: `model`, `prompt-file`, `max-concurrent`, `wait-seconds`, `max-rounds`. Host gate
 thresholds are environment variables on `run-review.sh`: `REVIEW_MIN_MEM_MB`
 (1536), `REVIEW_MAX_LOAD_PER_CPU` (2.5), `REVIEW_MAX_IO_FULL` (25, percent of
 IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`

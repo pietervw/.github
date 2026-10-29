@@ -164,5 +164,65 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn("No issues found", unparsed)
 
 
+class RoundTests(unittest.TestCase):
+    args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", max_rounds=3)
+
+    def bot_comment(self, body, cid=1):
+        return {"body": body, "id": cid, "user": {"login": "github-actions[bot]"}}
+
+    def test_current_round_reads_marker_from_bot_summary(self):
+        gh = FakeGitHub([
+            self.bot_comment("noise"),
+            self.bot_comment(f"{pr.SUMMARY_MARKER} x {pr.ROUND_MARKER_FMT.format(n=4)}", 2),
+            {"body": f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=9)}", "id": 3,
+             "user": {"login": "someone-else"}},
+        ])
+        self.assertEqual(pr.current_round(gh, 7), 4)
+
+    def test_current_round_zero_without_marker_or_comments(self):
+        gh = FakeGitHub([self.bot_comment(f"{pr.SUMMARY_MARKER} legacy, no round yet")])
+        self.assertEqual(pr.current_round(gh, 7), 0)
+        self.assertEqual(pr.current_round(FakeGitHub(), 7), 0)
+
+    def test_cap_verdict(self):
+        gh = FakeGitHub([self.bot_comment(f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=3)}")])
+        self.assertEqual(pr.round_cap_verdict(gh, 7, 3), (3, True))
+        self.assertEqual(pr.round_cap_verdict(gh, 7, 5), (3, False))
+        self.assertEqual(pr.round_cap_verdict(FakeGitHub(), 7, 3), (0, False))
+        for unlimited in (0, -1):
+            self.assertEqual(pr.round_cap_verdict(gh, 7, unlimited), (3, False))
+
+    def test_ran_post_increments_round_and_shows_cap(self):
+        review = {"summary": "s", "verdict": "no_issues", "findings": []}
+        text = pr.render_summary(self.args, "ran", "", review, [], "", round_num=3, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), text)
+        self.assertIn("review round 3 of 3", text)
+
+    def test_non_ran_post_keeps_round_without_bumping(self):
+        text = pr.render_summary(self.args, "failed", "x", None, [], "", round_num=2, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=2), text)
+        self.assertIn("review round 2 of 3", text)
+
+    def test_round_zero_marker_hidden_from_display(self):
+        text = pr.render_summary(self.args, "failed", "x", None, [], "", round_num=0, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=0), text)
+        self.assertNotIn("review round", text)
+
+    def test_capped_summary_says_so_and_how_to_override(self):
+        text = pr.render_summary(self.args, "capped", "", None, [], "", round_num=3, round_cap=3)
+        self.assertIn("Auto-review stopped after 3 completed review rounds", text)
+        self.assertIn("cap 3", text)
+        self.assertIn("@opencode review", text)
+        self.assertIn("max-rounds", text)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), text)
+        self.assertNotIn("refreshed on every push", text)
+
+    def test_no_round_marker_when_round_unknown(self):
+        review = {"summary": "s", "verdict": "no_issues", "findings": []}
+        text = pr.render_summary(self.args, "ran", "", review, [], "")
+        self.assertNotIn("opencode-review:round=", text)
+        self.assertNotIn("review round", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,10 @@ on:
       model:
         type: string
         default: zai-coding-plan/glm-5.3
+      max-rounds:
+        description: Completed review rounds allowed per PR before auto-review stops (0 = unlimited)
+        type: string
+        default: "3"
     secrets:
       ZHIPU_API_KEY:
         required: true
@@ -36,3 +40,4 @@ jobs:
         with:
           api-key: ${{ secrets.ZHIPU_API_KEY }}
           model: ${{ inputs.model }}
+          max-rounds: ${{ inputs.max-rounds }}
