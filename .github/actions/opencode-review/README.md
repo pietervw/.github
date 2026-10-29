@@ -38,7 +38,17 @@ Inputs: `model`, `prompt-file`, `max-concurrent`, `wait-seconds`. Host gate
 thresholds are environment variables on `run-review.sh`: `REVIEW_MIN_MEM_MB`
 (1536), `REVIEW_MAX_LOAD_PER_CPU` (2.5), `REVIEW_MAX_IO_FULL` (25, percent of
 IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
-(720), `REVIEW_LOCK_DIR` (`/tmp`).
+(720), `REVIEW_ATTEMPTS` (2), `REVIEW_RETRY_BACKOFF_SEC` (30),
+`REVIEW_RETRY_IF_DIED_UNDER` (180, seconds; only attempts that fail faster
+than this are retried — a full 720 s timeout is not, to free the CI slot),
+`REVIEW_LOCK_DIR` (`/tmp`).
+
+Total time is bounded: the capacity wait (`wait-seconds`, 600) plus a quick
+failed attempt (< 180) + backoff (30) plus one full run timeout (720 + up to
+30 s kill-after grace) on the final attempt is ≈ 1560 s — under the 2100 s
+runner watchdog and the 90-minute job timeout, which includes queueing for
+the runner's single CI slot (that queue, not the run, is what produced the
+5700 s worst-case check in the 2026-10-28 retro).
 
 ## Tests
 
