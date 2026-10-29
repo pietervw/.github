@@ -6,6 +6,11 @@
 # caps reviews specifically). If the host stays busy for REVIEW_WAIT_SEC the
 # review is skipped with a notice instead of overloading it.
 #
+# A run that dies quickly (under REVIEW_RETRY_IF_DIED_UNDER_SEC) is retried up
+# to REVIEW_ATTEMPTS times with backoff; the failure reason (stderr tail, or
+# the last event line when stderr is empty) is persisted to status.json so the
+# posted summary says why the review failed.
+#
 # This step never sees GITHUB_TOKEN: posting is a separate step.
 #
 # Writes to $REVIEW_OUT_DIR: events.jsonl, opencode.err, status.json
@@ -18,6 +23,9 @@ LOCK_DIR="${REVIEW_LOCK_DIR:-/tmp}"
 WAIT_SEC="${REVIEW_WAIT_SEC:-600}"
 POLL_SEC="${REVIEW_POLL_SEC:-30}"
 RUN_TIMEOUT_SEC="${REVIEW_RUN_TIMEOUT_SEC:-720}"
+ATTEMPTS="${REVIEW_ATTEMPTS:-2}"
+RETRY_BACKOFF_SEC="${REVIEW_RETRY_BACKOFF_SEC:-30}"
+RETRY_IF_DIED_UNDER_SEC="${REVIEW_RETRY_IF_DIED_UNDER:-180}"
 MIN_MEM_MB="${REVIEW_MIN_MEM_MB:-1536}"
 MAX_LOAD_PER_CPU="${REVIEW_MAX_LOAD_PER_CPU:-2.5}"
 MAX_IO_FULL="${REVIEW_MAX_IO_FULL:-25}"
@@ -115,18 +123,56 @@ export OPENCODE_DISABLE_AUTOUPDATE=1
 # servers and outranks the inline config above; verified on the VM. Ignore it.
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
 
+# Transient provider/network failures (observed 2026-10: ECONNRESET-class
+# exits after ~90 s with empty stderr, 9 of 39 failed runs) get one retry.
+# An attempt that already burned the full RUN_TIMEOUT_SEC is not retried: it
+# keeps the runner's single CI slot busy long enough, and the next push (or a
+# manual re-run) retries the review anyway.
+failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
+  if (( "$1" == 124 )); then
+    printf 'opencode timed out after %ss' "$RUN_TIMEOUT_SEC"
+    return
+  fi
+  local detail
+  detail="$(grep -v '^[[:space:]]*$' "${REVIEW_OUT_DIR}/opencode.err" 2>/dev/null | tail -n 1 | tr -d '\n' || true)"
+  if [ -z "$detail" ]; then
+    # The CLI can die with empty stderr; the event stream's last line often names the error.
+    detail="$(tail -n 1 "${REVIEW_OUT_DIR}/events.jsonl" 2>/dev/null | tr -d '\n' | head -c 300 || true)"
+  else
+    detail="${detail:0:300}"
+  fi
+  printf 'opencode exited with %s after %ss%s' "$1" "$2" "${detail:+: ${detail}}"
+}
+
 opencode --version
-set +e
-timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json --pure \
-  --model "$REVIEW_MODEL" "$(cat "${REVIEW_OUT_DIR}/prompt.md")" \
-  {lock_fd}>&- < /dev/null > "${REVIEW_OUT_DIR}/events.jsonl" 2> "${REVIEW_OUT_DIR}/opencode.err"
-rc=$?
-set -e
+rc=0
+elapsed=0
+attempt=1
+while (( attempt <= ATTEMPTS )); do
+  if (( attempt > 1 )); then
+    echo "retrying opencode run (attempt ${attempt}/${ATTEMPTS}) after ${RETRY_BACKOFF_SEC}s backoff" >&2
+    sleep "$RETRY_BACKOFF_SEC"
+  fi
+  started="$SECONDS"
+  set +e
+  timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json --pure \
+    --model "$REVIEW_MODEL" "$(cat "${REVIEW_OUT_DIR}/prompt.md")" \
+    {lock_fd}>&- < /dev/null > "${REVIEW_OUT_DIR}/events.jsonl" 2> "${REVIEW_OUT_DIR}/opencode.err"
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - started ))
+  if (( rc == 0 )); then break; fi
+  echo "::error::$(failure_detail "$rc" "$elapsed")" >&2
+  tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
+  if (( attempt < ATTEMPTS && elapsed < RETRY_IF_DIED_UNDER_SEC )); then
+    attempt=$(( attempt + 1 ))
+    continue
+  fi
+  break
+done
 
 if (( rc != 0 )); then
-  echo "::error::opencode exited with ${rc}"
-  tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
-  write_status failed "opencode exited with ${rc}"
+  write_status failed "$(failure_detail "$rc" "$elapsed") (attempt ${attempt}/${ATTEMPTS})"
   exit 1
 fi
 write_status ran ""
