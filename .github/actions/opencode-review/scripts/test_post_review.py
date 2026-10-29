@@ -164,6 +164,158 @@ class SummaryTests(unittest.TestCase):
         self.assertNotIn("No issues found", unparsed)
 
 
+class RoundTests(unittest.TestCase):
+    args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", max_rounds=3)
+
+    def bot_comment(self, body, cid=1):
+        return {"body": body, "id": cid, "user": {"login": "github-actions[bot]"}}
+
+    def test_current_round_reads_marker_from_bot_summary(self):
+        gh = FakeGitHub([
+            self.bot_comment("noise"),
+            self.bot_comment(f"{pr.SUMMARY_MARKER} x {pr.ROUND_MARKER_FMT.format(n=4)}", 2),
+            {"body": f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=9)}", "id": 3,
+             "user": {"login": "someone-else"}},
+        ])
+        self.assertEqual(pr.current_round(gh, 7), 4)
+
+    def test_current_round_zero_without_marker_or_comments(self):
+        gh = FakeGitHub([self.bot_comment(f"{pr.SUMMARY_MARKER} legacy, no round yet")])
+        self.assertEqual(pr.current_round(gh, 7), 0)
+        self.assertEqual(pr.current_round(FakeGitHub(), 7), 0)
+
+    def test_cap_verdict(self):
+        gh = FakeGitHub([self.bot_comment(f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=3)}")])
+        self.assertEqual(pr.round_cap_verdict(gh, 7, 3), (3, True))
+        self.assertEqual(pr.round_cap_verdict(gh, 7, 5), (3, False))
+        self.assertEqual(pr.round_cap_verdict(FakeGitHub(), 7, 3), (0, False))
+        for unlimited in (0, -1):
+            self.assertEqual(pr.round_cap_verdict(gh, 7, unlimited), (3, False))
+
+    def test_ran_post_increments_round_and_shows_cap(self):
+        review = {"summary": "s", "verdict": "no_issues", "findings": []}
+        text = pr.render_summary(self.args, "ran", "", review, [], "", round_num=3, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), text)
+        self.assertIn("review round 3 of 3", text)
+
+    def test_non_ran_post_keeps_round_without_bumping(self):
+        text = pr.render_summary(self.args, "failed", "x", None, [], "", round_num=2, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=2), text)
+        self.assertIn("review round 2 of 3", text)
+
+    def test_round_zero_marker_hidden_from_display(self):
+        text = pr.render_summary(self.args, "failed", "x", None, [], "", round_num=0, round_cap=3)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=0), text)
+        self.assertNotIn("review round", text)
+
+    def test_capped_summary_says_so_and_how_to_override(self):
+        text = pr.render_summary(self.args, "capped", "", None, [], "", round_num=3, round_cap=3)
+        self.assertIn("**Auto-review stopped** after 3 completed review rounds", text)
+        self.assertIn("cap 3", text)
+        self.assertIn("@opencode review", text)
+        self.assertIn("max-rounds", text)
+        self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), text)
+        self.assertNotIn("refreshed on every push", text)
+
+    def test_capped_without_round_marker_does_not_claim_zero_rounds(self):
+        text = pr.render_summary(self.args, "capped", "", None, [], "", round_num=0, round_cap=3)
+        self.assertIn("Auto-review stopped", text)
+        self.assertNotIn("after 0 completed", text)
+        self.assertIn("cap 3", text)
+
+    def test_no_round_marker_when_round_unknown(self):
+        review = {"summary": "s", "verdict": "no_issues", "findings": []}
+        text = pr.render_summary(self.args, "ran", "", review, [], "")
+        self.assertNotIn("opencode-review:round=", text)
+        self.assertNotIn("review round", text)
+
+
+class FakeRoutedGitHub:
+    """Routes get() by path prefix so main() can be driven end to end."""
+
+    def __init__(self, comments, pr):
+        self.comments = comments
+        self.pr = pr
+        self.writes = []
+
+    def get(self, path, paginate=False):
+        if path.startswith("issues/"):
+            return self.comments
+        if path.startswith("pulls/"):
+            return self.pr if path == "pulls/7" else []
+        return []
+
+    def write(self, method, path, payload):
+        self.writes.append((method, path, payload))
+        return {}
+
+
+@mock.patch.object(pr.sys, "argv", ["post_review.py"])
+class RoundStateMachineTests(unittest.TestCase):
+    def run_main(self, gh, status, tmp, sha="a" * 40, max_rounds=3):
+        events = os.path.join(tmp, "events.jsonl")
+        with open(events, "w", encoding="utf-8") as handle:
+            handle.write("")
+        argv = ["post_review.py", "--repo", "o/r", "--pr", "7", "--sha", sha,
+                "--model", "m", "--status", status, "--out-dir", tmp,
+                "--max-rounds", str(max_rounds)]
+        with mock.patch.object(pr, "GitHub", return_value=gh), \
+                mock.patch.object(pr.sys, "argv", argv):
+            return pr.main()
+
+    def open_pr(self, sha="a" * 40):
+        return {"state": "open", "head": {"sha": sha}}
+
+    def test_ran_post_bumps_round_and_patches_existing_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeRoutedGitHub(
+                [{"body": f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=2)}",
+                  "id": 42, "user": {"login": "github-actions[bot]"}}],
+                self.open_pr())
+            self.run_main(gh, "ran", tmp)
+            (method, path, payload), = gh.writes
+            self.assertEqual((method, path), ("PATCH", "issues/comments/42"))
+            self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), payload["body"])
+            self.assertIn("review round 3 of 3", payload["body"])
+
+    def test_first_ran_post_creates_summary_at_round_1(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeRoutedGitHub([], self.open_pr())
+            self.run_main(gh, "ran", tmp)
+            (method, path, payload), = gh.writes
+            self.assertEqual((method, path), ("POST", "issues/7/comments"))
+            self.assertIn(pr.ROUND_MARKER_FMT.format(n=1), payload["body"])
+
+    def test_capped_post_does_not_bump_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeRoutedGitHub(
+                [{"body": f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=3)}",
+                  "id": 42, "user": {"login": "github-actions[bot]"}}],
+                self.open_pr())
+            self.run_main(gh, "capped", tmp)
+            (_, _, payload), = gh.writes
+            self.assertIn(pr.ROUND_MARKER_FMT.format(n=3), payload["body"])
+            self.assertIn("Auto-review stopped", payload["body"])
+
+    def test_capped_without_prior_marker_still_reads_sensibly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeRoutedGitHub(
+                [{"body": f"{pr.SUMMARY_MARKER} no marker", "id": 42,
+                  "user": {"login": "github-actions[bot]"}}],
+                self.open_pr())
+            self.run_main(gh, "capped", tmp)
+            (_, _, payload), = gh.writes
+            self.assertIn("Auto-review stopped", payload["body"])
+            self.assertNotIn("after 0 completed", payload["body"])
+
+    def test_stale_sha_posts_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gh = FakeRoutedGitHub(
+                [{"body": f"{pr.SUMMARY_MARKER} {pr.ROUND_MARKER_FMT.format(n=1)}",
+                  "id": 42, "user": {"login": "github-actions[bot]"}}],
+                self.open_pr(sha="b" * 40))
+            self.assertEqual(self.run_main(gh, "ran", tmp, sha="a" * 40), 0)
+            self.assertEqual(gh.writes, [])
 class CleanTests(unittest.TestCase):
     def verdict(self, status="ran", review=None):
         findings = pr.clean_findings(review) if review else []

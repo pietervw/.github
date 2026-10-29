@@ -17,6 +17,9 @@ import subprocess
 import sys
 
 SUMMARY_MARKER = "<!-- opencode-review:summary -->"
+# Completed review rounds posted for this PR; the auto-review cap counts these.
+ROUND_MARKER_FMT = "<!-- opencode-review:round={n} -->"
+ROUND_RE = re.compile(r"<!-- opencode-review:round=(\d+) -->")
 # Machine-readable verdict for the automerge gate: "sha" is the reviewed commit, "clean" is 1 or 0.
 RESULT_MARKER_FMT = "<!-- opencode-review:result sha={sha} clean={clean} -->"
 FINGERPRINT_RE = re.compile(r"<!-- opencode-review:fp=([0-9a-f]{12}) -->")
@@ -138,11 +141,16 @@ def finding_markdown(finding, link=None, with_fingerprint=False):
     return text
 
 
-def render_summary(args, status, reason, review, findings, raw_text):
+def render_summary(args, status, reason, review, findings, raw_text, round_num=None, round_cap=None):
     short = args.sha[:7]
     result = RESULT_MARKER_FMT.format(sha=args.sha, clean=int(is_clean(status, review, findings)))
     head = [SUMMARY_MARKER, result, "## OpenCode review", ""]
+    if round_num is not None:
+        head.insert(1, ROUND_MARKER_FMT.format(n=round_num))
     meta = f"Commit `{short}` · model `{args.model}`"
+    if round_num is not None and round_num >= 1:
+        cap = f" of {round_cap}" if round_cap else ""
+        meta += f" · review round {round_num}{cap}"
     if args.run_url:
         meta += f" · [workflow run]({args.run_url})"
     head += [meta, ""]
@@ -150,6 +158,16 @@ def render_summary(args, status, reason, review, findings, raw_text):
             "_Automated, advisory review. It does not approve, block, or change this PR, and it is "
             "refreshed on every push._"]
 
+    if status == "capped":
+        cap = getattr(args, "max_rounds", 0) or "the configured"
+        stopped = (f"after {round_num} completed review round{'s' if round_num != 1 else ''}"
+                   if round_num and round_num >= 1 else "at the round cap")
+        foot = ["", "---", "_Automated, advisory review. It does not approve, block, or change this PR._"]
+        body = [f"**Auto-review stopped** {stopped} (cap {cap}).",
+                "Later pushes are not auto-reviewed. To get another one, raise `max-rounds` in this "
+                "repo's `opencode-review.yml` caller, or request a review manually (`@opencode review` "
+                "in repos that have the mention workflow)."]
+        return "\n".join(head + body + foot)
     if status == "busy":
         body = [f"**Review skipped:** the review host was busy ({reason}).",
                 "Push a commit, mark the PR ready for review again, or re-run the workflow to retry."]
@@ -231,12 +249,38 @@ class GitHub:
         return self._run(method, path, payload)
 
 
-def upsert_summary(gh, pr, body):
+def find_summary(gh, pr):
+    """The bot's single summary comment for this PR, or None."""
     existing = [c for c in gh.get(f"issues/{pr}/comments", paginate=True)
                 if SUMMARY_MARKER in (c.get("body") or "")
                 and (c.get("user") or {}).get("login") == "github-actions[bot]"]
+    return existing[0] if existing else None
+
+
+def round_from(comment):
+    """The round counter stored in a summary comment (0 when absent)."""
+    if not comment:
+        return 0
+    match = ROUND_RE.search(comment.get("body") or "")
+    return int(match.group(1)) if match else 0
+
+
+def current_round(gh, pr):
+    """Completed review rounds posted on this PR (0 when none yet)."""
+    return round_from(find_summary(gh, pr))
+
+
+def round_cap_verdict(gh, pr, max_rounds):
+    """(completed rounds, capped?) for the pre-review cap check; 0 or negative max never caps."""
+    rounds = current_round(gh, pr)
+    return rounds, max_rounds > 0 and rounds >= max_rounds
+
+
+def upsert_summary(gh, pr, body, existing=None):
+    if existing is None:
+        existing = find_summary(gh, pr)
     if existing:
-        gh.write("PATCH", f"issues/comments/{existing[0]['id']}", {"body": body})
+        gh.write("PATCH", f"issues/comments/{existing['id']}", {"body": body})
     else:
         gh.write("POST", f"issues/{pr}/comments", {"body": body})
 
@@ -271,15 +315,27 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--pr", type=int, required=True)
-    parser.add_argument("--sha", required=True)
+    parser.add_argument("--sha", default="")
     parser.add_argument("--model", default="")
-    parser.add_argument("--status", choices=["ran", "busy", "failed"], required=True)
+    parser.add_argument("--status", choices=["ran", "busy", "failed", "capped"], required=False)
     parser.add_argument("--reason", default="")
-    parser.add_argument("--out-dir", required=True)
+    parser.add_argument("--out-dir", default="")
     parser.add_argument("--run-url", default="")
+    parser.add_argument("--max-rounds", type=int, default=0,
+                        help="auto-review cap for this repo; 0 = unlimited (round display only)")
+    parser.add_argument("--check-round-cap", type=int, default=None, metavar="MAX",
+                        help="print 'round=N' and 'capped=true|false' for the pre-review cap check, then exit")
     args = parser.parse_args()
 
     gh = GitHub(args.repo)
+    if args.check_round_cap is not None:
+        round_num, capped = round_cap_verdict(gh, args.pr, args.check_round_cap)
+        print(f"round={round_num}")
+        print(f"capped={'true' if capped else 'false'}")
+        return 0
+    if not args.status:
+        parser.error("--status is required unless --check-round-cap is given")
+
     review = raw_text = None
     findings = []
     if args.status == "ran":
@@ -292,8 +348,14 @@ def main():
         print(f"PR moved on (state={pr.get('state')}, head={pr['head']['sha'][:7]}); not posting a stale review.")
         return 0
 
-    summary = render_summary(args, args.status, args.reason, review, findings, raw_text or "")
-    upsert_summary(gh, args.pr, summary)
+    summary_comment = find_summary(gh, args.pr)
+    prior_round = round_from(summary_comment)
+    # Only a completed review run consumes a round; busy/failed/capped posts keep the count.
+    round_num = prior_round + 1 if args.status == "ran" else prior_round
+
+    summary = render_summary(args, args.status, args.reason, review, findings, raw_text or "",
+                             round_num=round_num, round_cap=args.max_rounds or None)
+    upsert_summary(gh, args.pr, summary, existing=summary_comment)
     if args.status == "ran" and review is not None:
         post_inline(gh, args, findings, gh.get(f"pulls/{args.pr}/files", paginate=True))
     return 0
