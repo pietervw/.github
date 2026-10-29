@@ -20,6 +20,8 @@ SUMMARY_MARKER = "<!-- opencode-review:summary -->"
 # Completed review rounds posted for this PR; the auto-review cap counts these.
 ROUND_MARKER_FMT = "<!-- opencode-review:round={n} -->"
 ROUND_RE = re.compile(r"<!-- opencode-review:round=(\d+) -->")
+# Machine-readable verdict for the automerge gate: "sha" is the reviewed commit, "clean" is 1 or 0.
+RESULT_MARKER_FMT = "<!-- opencode-review:result sha={sha} clean={clean} -->"
 FINGERPRINT_RE = re.compile(r"<!-- opencode-review:fp=([0-9a-f]{12}) -->")
 REVIEW_BLOCK_RE = re.compile(r"<<<REVIEW_JSON\s*(.*?)\s*REVIEW_JSON>>>", re.DOTALL)
 HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
@@ -90,6 +92,18 @@ def clean_findings(review):
     return kept[:MAX_FINDINGS]
 
 
+def is_clean(status, review, findings):
+    """True only for a completed, parsed review that found nothing at P0-P2.
+
+    Deliberately strict: a skipped, failed, unparseable or blocking review is never clean,
+    and neither is an `issues_found` verdict even if its findings were filtered out by the
+    confidence bar. P3 findings alone do not stop a `no_issues` verdict from being clean.
+    """
+    if status != "ran" or review is None or review.get("verdict") != "no_issues":
+        return False
+    return not any(f["severity"] in ("P0", "P1", "P2") for f in findings)
+
+
 def fingerprint(finding):
     """Stable across pushes: line numbers move, the issue identity does not."""
     key = "|".join([finding["path"], finding["severity"], finding["category"],
@@ -129,7 +143,8 @@ def finding_markdown(finding, link=None, with_fingerprint=False):
 
 def render_summary(args, status, reason, review, findings, raw_text, round_num=None, round_cap=None):
     short = args.sha[:7]
-    head = [SUMMARY_MARKER, "## OpenCode review", ""]
+    result = RESULT_MARKER_FMT.format(sha=args.sha, clean=int(is_clean(status, review, findings)))
+    head = [SUMMARY_MARKER, result, "## OpenCode review", ""]
     if round_num is not None:
         head.insert(1, ROUND_MARKER_FMT.format(n=round_num))
     meta = f"Commit `{short}` · model `{args.model}`"

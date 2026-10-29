@@ -316,6 +316,37 @@ class RoundStateMachineTests(unittest.TestCase):
                 self.open_pr(sha="b" * 40))
             self.assertEqual(self.run_main(gh, "ran", tmp, sha="a" * 40), 0)
             self.assertEqual(gh.writes, [])
+class CleanTests(unittest.TestCase):
+    def verdict(self, status="ran", review=None):
+        findings = pr.clean_findings(review) if review else []
+        return pr.is_clean(status, review, findings)
+
+    def test_clean_only_for_ran_no_issues_without_p0_to_p2(self):
+        self.assertTrue(self.verdict(review={"verdict": "no_issues", "findings": []}))
+        self.assertTrue(self.verdict(review={"verdict": "no_issues", "findings": [finding(severity="P3")]}))
+        for severity in ("P0", "P1", "P2"):
+            self.assertFalse(self.verdict(review={"verdict": "no_issues", "findings": [finding(severity=severity)]}))
+
+    def test_not_clean_when_skipped_failed_unparsed_or_flagged(self):
+        clean = {"verdict": "no_issues", "findings": []}
+        self.assertFalse(self.verdict("busy", clean))
+        self.assertFalse(self.verdict("failed", clean))
+        self.assertFalse(self.verdict(review=None))
+        self.assertFalse(self.verdict(review={"verdict": "issues_found", "findings": []}))
+        self.assertFalse(self.verdict(review={"verdict": "blocking_issues", "findings": []}))
+        self.assertFalse(self.verdict(review={"findings": []}))
+
+    def test_summary_carries_machine_readable_result_for_the_reviewed_sha(self):
+        args = PostingTests.args
+        for status, review, expected in (
+            ("ran", {"verdict": "no_issues", "summary": "ok", "findings": []}, 1),
+            ("ran", {"verdict": "issues_found", "summary": "x", "findings": [finding()]}, 0),
+            ("busy", None, 0),
+        ):
+            findings = pr.clean_findings(review) if review else []
+            text = pr.render_summary(args, status, "r", review, findings, "")
+            self.assertIn(pr.RESULT_MARKER_FMT.format(sha="a" * 40, clean=expected), text)
+            self.assertTrue(text.startswith(pr.SUMMARY_MARKER))
 
 
 if __name__ == "__main__":

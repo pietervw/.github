@@ -53,6 +53,44 @@ jobs:
 The cap applies to the automatic on-push review only; a requested
 `@opencode review` still runs.
 
+## Automerge gate (opt-in, marketing repos only)
+
+`.github/workflows/automerge.yml` + `.github/actions/automerge-gate/`: merges a PR labelled
+`automerge` only if the changed files are allow-listed (never migrations, workflows, lockfiles, auth,
+payments, env/config), the OpenCode review for the exact head SHA is clean, all other checks are green
+and no review thread is unresolved. Definition of "clean" and the block list:
+`.github/actions/automerge-gate/README.md`. Use it only in SupportSeal-app, seallabs and the
+marketing site; every other repo keeps the manual merge.
+
+Needs a `MERGE_TOKEN` secret (PAT or app token). `GITHUB_TOKEN` merges do not trigger deploys.
+
+```yaml
+name: Automerge
+
+on:
+  pull_request_target:
+    types: [labeled]
+  workflow_run:
+    workflows: ["CI", "OpenCode review"]   # use the repo's real workflow names
+    types: [completed]
+
+concurrency:
+  group: automerge-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.run_id }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  gate:
+    permissions:
+      contents: read
+    uses: pietervw/.github/.github/workflows/automerge.yml@v1
+    secrets:
+      MERGE_TOKEN: ${{ secrets.MERGE_TOKEN }}
+```
+
+Both triggers run the default-branch copy of this file, so a PR cannot edit its own gate.
+
 ### Releasing a change
 
 `v1` is a moving tag. Change this repo through a PR, then move the tag
@@ -65,6 +103,7 @@ Settings, Actions, General, Access, "Accessible from repositories owned by the u
 
 ### Tests
 
-`python3 -m unittest discover -s .github/actions/opencode-review/scripts`
+`python3 -B -m unittest discover -s .github/actions/opencode-review/scripts` and the same for
+`.github/actions/automerge-gate/scripts`
 (no CI here: the private-repo runners are the only ones that work, and none is
 registered for this repo).

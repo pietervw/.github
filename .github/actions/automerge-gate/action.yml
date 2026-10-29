@@ -1,0 +1,52 @@
+name: Automerge gate
+description: >-
+  Merges an opted-in (labelled) pull request only when the changed files are on the allow list
+  and not on the built-in block list, the OpenCode review for the exact head SHA is clean, all
+  other checks are green and no review thread is unresolved. Otherwise it writes the reasons
+  to the job summary and does nothing.
+
+inputs:
+  token:
+    description: PAT or app token allowed to merge. Not GITHUB_TOKEN, whose merges do not trigger deploy workflows.
+    required: true
+  pr-number:
+    description: Pull request number
+    required: true
+  label:
+    description: Opt-in label
+    required: false
+    default: automerge
+  allow-globs:
+    description: Newline-separated fnmatch globs a changed path must match. Empty uses the marketing-site defaults. The built-in block list always wins.
+    required: false
+    default: ""
+  merge-method:
+    description: squash, merge or rebase
+    required: false
+    default: squash
+  dry-run:
+    description: Evaluate and report without merging
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Evaluate and merge
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        ALLOW_GLOBS: ${{ inputs.allow-globs }}
+        DRY_RUN: ${{ inputs.dry-run }}
+        PR: ${{ inputs.pr-number }}
+        LABEL: ${{ inputs.label }}
+        METHOD: ${{ inputs.merge-method }}
+        REPO: ${{ github.repository }}
+      run: |
+        set -euo pipefail
+        args=(--repo "${REPO}" --pr "${PR}" --label "${LABEL}" --merge-method "${METHOD}")
+        while IFS= read -r glob; do
+          [ -n "${glob}" ] && args+=(--allow-glob "${glob}")
+        done <<< "${ALLOW_GLOBS}"
+        [ "${DRY_RUN}" = "true" ] && args+=(--dry-run)
+        python3 -B "${{ github.action_path }}/scripts/automerge_gate.py" "${args[@]}"
