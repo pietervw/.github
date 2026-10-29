@@ -60,17 +60,24 @@ runs:
 
     # Read-only pre-check: has this PR already used its auto-review rounds?
     # Fails open (runs the review) when the comments API is unreachable, so a
-    # GitHub hiccup can never silence reviews.
+    # GitHub hiccup can never silence reviews; the failure is still visible.
     - name: Review round cap
       id: roundcap
       shell: bash
       env:
         GH_TOKEN: ${{ inputs.github-token }}
+        REVIEW_MAX_ROUNDS: ${{ inputs.max-rounds }}
       run: |
         set -uo pipefail
-        out="$(python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
+        max_rounds="${REVIEW_MAX_ROUNDS:-3}"
+        [[ "${max_rounds}" =~ ^[0-9]+$ ]] || max_rounds="3"
+        out=""
+        if ! out="$(python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
           --repo "${GITHUB_REPOSITORY}" --pr "${{ github.event.pull_request.number }}" \
-          --check-round-cap "${{ inputs.max-rounds }}" 2>&1)" || out="capped=false"
+          --check-round-cap "${max_rounds}" 2>&1)"; then
+          echo "::warning::round-cap check failed, running the review anyway: ${out}"
+          out="capped=false"
+        fi
         echo "${out}" >&2
         if echo "${out}" | grep -q '^capped=true$'; then
           echo "capped=true" >> "${GITHUB_OUTPUT}"
@@ -108,14 +115,17 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         REVIEW_MODEL: ${{ inputs.model }}
+        REVIEW_MAX_ROUNDS: ${{ inputs.max-rounds }}
       run: |
         set -euo pipefail
         out_dir="${RUNNER_TEMP}/opencode-review"
+        max_rounds="${REVIEW_MAX_ROUNDS:-3}"
+        [[ "${max_rounds}" =~ ^[0-9]+$ ]] || max_rounds="3"
         if [ "${{ steps.roundcap.outputs.capped }}" = "true" ]; then
           python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
             --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
             --sha "${PR_HEAD_SHA}" --model "${REVIEW_MODEL}" \
-            --status capped --max-rounds "${{ inputs.max-rounds }}" \
+            --status capped --max-rounds "${max_rounds}" \
             --out-dir "${out_dir}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           exit 0
@@ -135,5 +145,5 @@ runs:
           --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
           --sha "${PR_HEAD_SHA}" --model "${REVIEW_MODEL}" \
           --status "${status}" --reason "${reason}" --out-dir "${out_dir}" \
-          --max-rounds "${{ inputs.max-rounds }}" \
+          --max-rounds "${max_rounds}" \
           --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

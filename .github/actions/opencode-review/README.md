@@ -35,10 +35,14 @@ re-run, or raise `max-rounds`).
   consume a round.
 - The counter lives in the summary comment (`<!-- opencode-review:round=N -->`),
   so it is per-PR, survives runner/workflow changes, and needs no extra state.
+  Deleting the summary comment resets the counter to 0 (auto-review resumes).
 - The pre-review cap check fails open: if the comments API is unreachable the
-  review runs anyway.
+  review runs anyway, with a warning carrying the failure.
+- The cap requires the default `github.token` posting identity: with a custom
+  `github-token` whose login is not `github-actions[bot]`, every run posts a
+  new comment and the counter never advances (cap stays disengaged).
 - `max-rounds: "0"` disables the cap. Callers override it via the reusable
-  workflow's `max-rounds` input.
+  workflow's `max-rounds` input; an empty or non-numeric value falls back to 3.
 
 ## Using it
 

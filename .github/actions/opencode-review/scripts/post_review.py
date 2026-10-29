@@ -145,11 +145,13 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
 
     if status == "capped":
         cap = getattr(args, "max_rounds", 0) or "the configured"
+        stopped = (f"after {round_num} completed review round{'s' if round_num != 1 else ''}"
+                   if round_num and round_num >= 1 else "at the round cap")
         foot = ["", "---", "_Automated, advisory review. It does not approve, block, or change this PR._"]
-        body = [f"**Auto-review stopped after {round_num} completed review round"
-                f"{'s' if round_num != 1 else ''}** (cap {cap}).",
-                "Later pushes are not auto-reviewed. For another opinion, comment `@opencode review`, "
-                "re-run the workflow, or raise `max-rounds` in this repo's `opencode-review.yml`."]
+        body = [f"**Auto-review stopped** {stopped} (cap {cap}).",
+                "Later pushes are not auto-reviewed. To get another one, raise `max-rounds` in this "
+                "repo's `opencode-review.yml` caller, or request a review manually (`@opencode review` "
+                "in repos that have the mention workflow)."]
         return "\n".join(head + body + foot)
     if status == "busy":
         body = [f"**Review skipped:** the review host was busy ({reason}).",
@@ -240,13 +242,17 @@ def find_summary(gh, pr):
     return existing[0] if existing else None
 
 
+def round_from(comment):
+    """The round counter stored in a summary comment (0 when absent)."""
+    if not comment:
+        return 0
+    match = ROUND_RE.search(comment.get("body") or "")
+    return int(match.group(1)) if match else 0
+
+
 def current_round(gh, pr):
     """Completed review rounds posted on this PR (0 when none yet)."""
-    summary = find_summary(gh, pr)
-    if not summary:
-        return 0
-    match = ROUND_RE.search(summary.get("body") or "")
-    return int(match.group(1)) if match else 0
+    return round_from(find_summary(gh, pr))
 
 
 def round_cap_verdict(gh, pr, max_rounds):
@@ -328,10 +334,7 @@ def main():
         return 0
 
     summary_comment = find_summary(gh, args.pr)
-    prior_round = 0
-    if summary_comment:
-        match = ROUND_RE.search(summary_comment.get("body") or "")
-        prior_round = int(match.group(1)) if match else 0
+    prior_round = round_from(summary_comment)
     # Only a completed review run consumes a round; busy/failed/capped posts keep the count.
     round_num = prior_round + 1 if args.status == "ran" else prior_round
 
