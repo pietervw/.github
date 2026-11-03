@@ -48,18 +48,67 @@ def collect_text(events_path):
     return "\n".join(parts)
 
 
-def extract_review(text):
-    """Return the last marker-delimited JSON object in the model output, or None."""
-    blocks = REVIEW_BLOCK_RE.findall(text)
-    if not blocks:
-        return None
-    raw = blocks[-1].strip()
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
+def _parse_json_object(raw):
+    """Parse a review-JSON candidate, or None if it is not a JSON object."""
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     try:
         data = json.loads(raw)
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _scan_loose_review(text):
+    """Return the last balanced JSON object that looks like a review, or None.
+
+    Fallback for fallback-tier models that drop the REVIEW_JSON markers or
+    mangle the fence style (e.g. '''json instead of ```json): scan string-aware
+    for {...} spans and keep the last one carrying the required keys. Prose
+    with stray braces parses to nothing or lacks the keys, so it is skipped.
+    """
+    best = None
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                data = _parse_json_object(text[start:i + 1])
+                if data is not None and "summary" in data and "verdict" in data:
+                    best = data
+                start = -1
+    return best
+
+
+def extract_review(text):
+    """Return the review JSON object from the model output, or None.
+
+    Prefers the last <<<REVIEW_JSON ... REVIEW_JSON>>> marker block; if that is
+    missing or unparseable, falls back to a balanced-brace scan so weaker
+    fallback-tier models still render (they must emit summary+verdict keys).
+    """
+    blocks = REVIEW_BLOCK_RE.findall(text)
+    if blocks:
+        data = _parse_json_object(blocks[-1])
+        if data is not None:
+            return data
+    return _scan_loose_review(text)
 
 
 def clean_findings(review):
