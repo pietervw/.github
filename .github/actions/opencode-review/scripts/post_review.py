@@ -48,18 +48,67 @@ def collect_text(events_path):
     return "\n".join(parts)
 
 
-def extract_review(text):
-    """Return the last marker-delimited JSON object in the model output, or None."""
-    blocks = REVIEW_BLOCK_RE.findall(text)
-    if not blocks:
-        return None
-    raw = blocks[-1].strip()
-    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
+def _parse_json_object(raw):
+    """Parse a review-JSON candidate, or None if it is not a JSON object."""
+    raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip())
     try:
         data = json.loads(raw)
     except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _scan_loose_review(text):
+    """Return the last balanced JSON object that looks like a review, or None.
+
+    Fallback for fallback-tier models that drop the REVIEW_JSON markers or
+    mangle the fence style (e.g. '''json instead of ```json): scan string-aware
+    for {...} spans and keep the last one carrying the required keys. Prose
+    with stray braces parses to nothing or lacks the keys, so it is skipped.
+    """
+    best = None
+    depth = 0
+    start = -1
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                data = _parse_json_object(text[start:i + 1])
+                if data is not None and "summary" in data and "verdict" in data:
+                    best = data
+                start = -1
+    return best
+
+
+def extract_review(text):
+    """Return the review JSON object from the model output, or None.
+
+    Prefers the last <<<REVIEW_JSON ... REVIEW_JSON>>> marker block; if that is
+    missing or unparseable, falls back to a balanced-brace scan so weaker
+    fallback-tier models still render (they must emit summary+verdict keys).
+    """
+    blocks = REVIEW_BLOCK_RE.findall(text)
+    if blocks:
+        data = _parse_json_object(blocks[-1])
+        if data is not None:
+            return data
+    return _scan_loose_review(text)
 
 
 def clean_findings(review):
@@ -147,7 +196,11 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
     head = [SUMMARY_MARKER, result, "## OpenCode review", ""]
     if round_num is not None:
         head.insert(1, ROUND_MARKER_FMT.format(n=round_num))
-    meta = f"Commit `{short}` · model `{args.model}`"
+    meta = f"Commit `{short}`"
+    if getattr(args, "model", ""):
+        meta += f" · model `{args.model}`"
+    if getattr(args, "note", ""):
+        meta += f" · {args.note}"
     if round_num is not None and round_num >= 1:
         cap = f" of {round_cap}" if round_cap else ""
         meta += f" · review round {round_num}{cap}"
@@ -317,6 +370,8 @@ def main():
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--sha", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--note", default="",
+                        help="Short suffix for the summary meta line, e.g. which fallback reviewed")
     parser.add_argument("--status", choices=["ran", "busy", "failed", "capped"], required=False)
     parser.add_argument("--reason", default="")
     parser.add_argument("--out-dir", default="")

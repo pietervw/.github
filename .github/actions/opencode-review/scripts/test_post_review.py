@@ -51,6 +51,28 @@ class ParsingTests(unittest.TestCase):
         self.assertIsNone(pr.extract_review("<<<REVIEW_JSON\n{broken\nREVIEW_JSON>>>"))
         self.assertIsNone(pr.extract_review("<<<REVIEW_JSON\n[1]\nREVIEW_JSON>>>"))
 
+    def test_loose_scan_parses_mangled_fence_without_markers(self):
+        # Shape seen live from opencode/glm-5.3-flash-free: the REVIEW_JSON
+        # markers were dropped and the fence rendered as '''json.
+        text = "Here is my review.\n'''json\n" + json.dumps(
+            {"summary": "s", "verdict": "no_issues", "findings": [], "not_verified": []}
+        ) + "\n'''\n"
+        review = pr.extract_review(text)
+        self.assertEqual(review["verdict"], "no_issues")
+
+    def test_loose_scan_takes_last_candidate_and_requires_review_keys(self):
+        draft = json.dumps({"summary": "old", "verdict": "issues_found"})
+        final = json.dumps({"summary": "new", "verdict": "no_issues"})
+        review = pr.extract_review(f"prose {draft} more\n{final}\n")
+        self.assertEqual(review["summary"], "new")
+        self.assertIsNone(pr.extract_review(json.dumps({"summary": "no verdict"})))
+        self.assertIsNone(pr.extract_review("plain text, no braces at all"))
+
+    def test_marker_block_still_wins_over_loose_prose(self):
+        loose = json.dumps({"summary": "loose", "verdict": "issues_found"})
+        marked = "<<<REVIEW_JSON\n" + json.dumps({"summary": "marked", "verdict": "no_issues"}) + "\nREVIEW_JSON>>>"
+        self.assertEqual(pr.extract_review(f"{loose}\n{marked}")["summary"], "marked")
+
     def test_clean_findings_filters_sorts_and_caps(self):
         raw = {"findings": [
             finding(severity="P3", title="low"),
@@ -162,6 +184,18 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("no parseable result", unparsed)
         self.assertIn("not a clean review", unparsed)
         self.assertNotIn("No issues found", unparsed)
+
+    def test_note_lands_in_meta_line(self):
+        args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", note="fallback used")
+        text = pr.render_summary(args, "ran", "", {"summary": "S", "verdict": "no_issues", "findings": []}, [], "")
+        self.assertIn("model `m` · fallback used", text)
+
+    def test_meta_line_omits_model_when_none_ran(self):
+        # Capped/busy posts name no model — no model reviewed the commit.
+        args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="", run_url="")
+        text = pr.render_summary(args, "capped", "", None, [], "")
+        self.assertTrue(text.startswith("### OpenCode review") or "Commit `" in text)
+        self.assertNotIn("model `", text)
 
 
 class RoundTests(unittest.TestCase):

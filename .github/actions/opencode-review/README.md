@@ -1,7 +1,9 @@
 # OpenCode PR review (reusable composite action)
 
 Read-only, automatic review of ready-for-review pull requests, run by OpenCode
-(`zai-coding-plan/glm-5.3`) on a self-hosted runner. Piloted on `pool-calculator`.
+on a self-hosted runner. The primary model is the paid `zai-coding-plan/glm-5.3`;
+when it hits its usage limit the review falls back to keyless OpenCode free-tier
+models (see the `models` input), so a capped z.ai window no longer fails reviews.
 
 ## What it does
 
@@ -14,6 +16,14 @@ Read-only, automatic review of ready-for-review pull requests, run by OpenCode
 3. OpenCode runs with read-only tools: no shell, no edits, no network, no paths
    outside the workspace. It reads the diff from `.opencode-review/diff.patch`
    (git-excluded). This step gets only the z.ai key, never `GITHUB_TOKEN`.
+   `models` is a chain, primary first: a quota-class failure of one model
+   (429 / usage-limit / billing text in the failure detail) advances to the
+   next — the free entries are keyless from inside the CLI. Other quick
+   failures keep the single same-model retry; a full run timeout is never
+   retried or escalated (it already held the CI slot). When the primary
+   reports a quota failure a host-local breaker file makes the window's later
+   reviews skip the doomed primary (`REVIEW_BREAKER_TTL`); a primary success
+   clears it. The model that actually reviewed is shown in the summary.
 4. `scripts/post_review.py` posts the result with the PR-scoped token: one
    summary comment edited in place on every run, plus a single `COMMENT` review
    holding inline comments for new findings that land on diff lines. It never
@@ -56,21 +66,38 @@ repo; see the root README for the caller and the rollout requirements
 
 ## Tuning
 
-Inputs: `model`, `prompt-file`, `max-concurrent`, `wait-seconds`, `max-rounds`. Host gate
+Inputs: `models` (chain; `model` is a deprecated single-model pin that disables
+fallback), `cli-version` (`host`, or an exact version the host must provide —
+the action verifies but never installs the CLI), `prompt-file`,
+`max-concurrent`, `wait-seconds`, `max-rounds`. Host gate
 thresholds are environment variables on `run-review.sh`: `REVIEW_MIN_MEM_MB`
 (1536), `REVIEW_MAX_LOAD_PER_CPU` (2.5), `REVIEW_MAX_IO_FULL` (25, percent of
 IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
-(720), `REVIEW_ATTEMPTS` (2), `REVIEW_RETRY_BACKOFF_SEC` (30),
+(720), `REVIEW_ATTEMPTS` (2, per model), `REVIEW_RETRY_BACKOFF_SEC` (30),
 `REVIEW_RETRY_IF_DIED_UNDER` (180, seconds; only attempts that fail faster
 than this are retried — a full 720 s timeout is not, to free the CI slot),
-`REVIEW_LOCK_DIR` (`/tmp`).
+`REVIEW_BREAKER_TTL` (10800, seconds the primary is skipped after a quota
+failure; 0 disables), `REVIEW_LOCK_DIR` (`/tmp`). The default breaker file
+is scoped to the primary API key (short hash) so rotating keys does not
+carry breaker state over; `REVIEW_BREAKER_FILE` overrides the whole path.
 
-Total time is bounded: the capacity wait (`wait-seconds`, 600) plus a quick
-failed attempt (< 180) + backoff (30) plus one full run timeout (720 + up to
-30 s kill-after grace) on the final attempt is ≈ 1560 s — under the 2100 s
-runner watchdog and the 90-minute job timeout, which includes queueing for
-the runner's single CI slot (that queue, not the run, is what produced the
-5700 s worst-case check in the 2026-10-28 retro).
+Chain walking: a quota-class failure advances immediately (no retry); any
+other sub-180 s failure gets one same-model retry and then advances too; a
+full run timeout stops the run (it already held the CI slot long enough).
+Only a quota-class failure of the primary opens the breaker.
+
+Time is bounded per model by its attempts: either one slow non-timeout
+death (just under `REVIEW_RUN_TIMEOUT_SEC`, 720) or two quick deaths
+(< 180 s each plus 30 s backoff); a death at the full timeout exits the run
+instead of advancing. So the chain's worst case is the capacity wait
+(`wait-seconds`, 600) plus ~3 × 820 s ≈ 71 min — and the job's
+`timeout-minutes` (20 in the inlined callers) is the practical ceiling: a
+chain of slow failures presents as a job timeout, i.e. a failed run, not a
+hang. The 2100 s runner watchdog and 90-minute job timeout (which includes
+queueing for the runner's single CI slot — the 5700 s worst case in the
+2026-10-28 retro was queue, not run) still stand. In practice only quota
+errors walk the chain, and those die in seconds; the breaker keeps later
+reviews in the window from even paying that.
 
 ## Tests
 
