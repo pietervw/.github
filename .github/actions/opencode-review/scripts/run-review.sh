@@ -37,7 +37,7 @@ RUN_TIMEOUT_SEC="${REVIEW_RUN_TIMEOUT_SEC:-720}"
 ATTEMPTS="${REVIEW_ATTEMPTS:-2}"
 RETRY_BACKOFF_SEC="${REVIEW_RETRY_BACKOFF_SEC:-30}"
 RETRY_IF_DIED_UNDER_SEC="${REVIEW_RETRY_IF_DIED_UNDER:-180}"
-BREAKER_TTL_SEC="${REVIEW_BREAKER_TTL:-10800}"
+BREAKER_TTL_SEC="${REVIEW_BREAKER_TTL:-1800}"
 # Scope the default breaker file to the primary API key (short hash, never the
 # key itself) so rotating or alternating keys does not carry breaker state over;
 # REVIEW_BREAKER_FILE remains an explicit override.
