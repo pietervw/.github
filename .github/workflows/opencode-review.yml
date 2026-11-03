@@ -6,8 +6,17 @@ on:
   workflow_call:
     inputs:
       model:
+        description: >-
+          Deprecated single-model pin; when set it replaces the whole chain and
+          disables fallback. Prefer models.
         type: string
-        default: zai-coding-plan/glm-5.3
+        default: ""
+      models:
+        description: >-
+          Comma-separated model chain, primary first; later entries are used when an
+          earlier one fails with a usage limit (429/quota/billing).
+        type: string
+        default: zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free
       max-rounds:
         description: Completed review rounds allowed per PR before auto-review stops (0 = unlimited)
         type: string
@@ -40,4 +49,5 @@ jobs:
         with:
           api-key: ${{ secrets.ZHIPU_API_KEY }}
           model: ${{ inputs.model }}
+          models: ${{ inputs.models }}
           max-rounds: ${{ inputs.max-rounds }}

@@ -163,6 +163,11 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("not a clean review", unparsed)
         self.assertNotIn("No issues found", unparsed)
 
+    def test_note_lands_in_meta_line(self):
+        args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", note="fallback used")
+        text = pr.render_summary(args, "ran", "", {"summary": "S", "verdict": "no_issues", "findings": []}, [], "")
+        self.assertIn("model `m` · fallback used", text)
+
 
 class RoundTests(unittest.TestCase):
     args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", max_rounds=3)

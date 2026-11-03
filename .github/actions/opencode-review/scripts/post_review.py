@@ -148,6 +148,8 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
     if round_num is not None:
         head.insert(1, ROUND_MARKER_FMT.format(n=round_num))
     meta = f"Commit `{short}` · model `{args.model}`"
+    if getattr(args, "note", ""):
+        meta += f" · {args.note}"
     if round_num is not None and round_num >= 1:
         cap = f" of {round_cap}" if round_cap else ""
         meta += f" · review round {round_num}{cap}"
@@ -317,6 +319,8 @@ def main():
     parser.add_argument("--pr", type=int, required=True)
     parser.add_argument("--sha", default="")
     parser.add_argument("--model", default="")
+    parser.add_argument("--note", default="",
+                        help="Short suffix for the summary meta line, e.g. which fallback reviewed")
     parser.add_argument("--status", choices=["ran", "busy", "failed", "capped"], required=False)
     parser.add_argument("--reason", default="")
     parser.add_argument("--out-dir", default="")

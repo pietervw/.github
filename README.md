@@ -5,7 +5,10 @@ Shared automation for Pete's repositories.
 ## OpenCode PR review
 
 Automatic, read-only review of ready (non-draft) pull requests by OpenCode
-(`zai-coding-plan/glm-5.3`) on the `ubuntu-agents` self-hosted runners.
+on the `ubuntu-agents` self-hosted runners. The primary model is the paid
+`zai-coding-plan/glm-5.3`; when it hits its usage limit the review falls back
+to keyless OpenCode free-tier models, so a capped z.ai window no longer fails
+reviews (which model reviewed is shown in the summary).
 
 - `.github/workflows/opencode-review.yml`: reusable workflow (guards, runner, permissions).
 - `.github/actions/opencode-review/`: composite action (capacity gate, read-only run,
@@ -49,6 +52,30 @@ jobs:
     with:
       max-rounds: "5"   # or "0" for unlimited
 ```
+
+4. Optional: override the model chain (default
+   `zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free`;
+   later entries are keyless free-tier fallbacks used when the primary reports
+   a usage limit). The legacy `model:` input still works as a single-model pin
+   that disables fallback:
+
+```yaml
+    with:
+      models: "zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free"
+```
+
+4. Optional: override the model chain (default `zai-coding-plan/glm-5.3,
+   opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free`). Later
+   entries are used when earlier ones fail with a usage limit; the free
+   entries need no API key:
+
+```yaml
+    with:
+      models: "zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free"
+```
+
+   The old `model:` input is a deprecated single-model pin: setting it
+   replaces the whole chain and disables fallback.
 
 The cap applies to the automatic on-push review only; a requested
 `@opencode review` still runs.

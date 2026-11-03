@@ -6,10 +6,18 @@
 # caps reviews specifically). If the host stays busy for REVIEW_WAIT_SEC the
 # review is skipped with a notice instead of overloading it.
 #
-# A run that dies quickly (under REVIEW_RETRY_IF_DIED_UNDER_SEC) gets up to
-# REVIEW_ATTEMPTS total attempts with backoff; the failure reason (stderr tail,
-# or the last event line when stderr is empty) is persisted to status.json so
-# the posted summary says why the review failed.
+# REVIEW_MODELS is a comma-separated chain: the first entry is the primary
+# (paid z.ai coding plan), later entries are keyless OpenCode free-tier
+# fallbacks. A failure that looks like a provider usage limit (429 / quota /
+# billing text) advances to the next model immediately — the window will not
+# recover inside this run. Any other failure that died quickly (under
+# REVIEW_RETRY_IF_DIED_UNDER_SEC) is retried once on the same model first. A
+# full run timeout is never retried or escalated: it already held the host's
+# single CI slot long enough. When the primary fails with a usage limit a
+# host-local breaker file (REVIEW_BREAKER_FILE, TTL REVIEW_BREAKER_TTL_SEC)
+# makes the window's next reviews skip the doomed primary; a primary success
+# clears it. The model that produced the review lands in status.json so the
+# posted summary shows which tier reviewed.
 #
 # This step never sees GITHUB_TOKEN: posting is a separate step.
 #
@@ -17,15 +25,20 @@
 # Exit 0 for ran or skipped-busy, non-zero for a failed run.
 set -euo pipefail
 
-: "${REVIEW_OUT_DIR:?}" "${REVIEW_MODEL:?}" "${REVIEW_PROMPT_FILE:?}" "${PR_BASE_REF:?}"
+: "${REVIEW_OUT_DIR:?}" "${REVIEW_PROMPT_FILE:?}" "${PR_BASE_REF:?}"
+# REVIEW_MODEL (single) is still honoured as a one-entry chain for older callers.
+REVIEW_MODELS="${REVIEW_MODELS:-${REVIEW_MODEL:-}}"
+: "${REVIEW_MODELS:?}"
 MAX_CONCURRENT="${REVIEW_MAX_CONCURRENT:-1}"
 LOCK_DIR="${REVIEW_LOCK_DIR:-/tmp}"
 WAIT_SEC="${REVIEW_WAIT_SEC:-600}"
 POLL_SEC="${REVIEW_POLL_SEC:-30}"
 RUN_TIMEOUT_SEC="${REVIEW_RUN_TIMEOUT_SEC:-720}"
 ATTEMPTS="${REVIEW_ATTEMPTS:-2}"
-RETRY_BACKOFF_SEC="${REVIEW_RETRY_BACKOFF_SEC:-30}"
+RETRY_BACKOFF_SEC="${RETRY_BACKOFF_SEC:-30}"
 RETRY_IF_DIED_UNDER_SEC="${REVIEW_RETRY_IF_DIED_UNDER:-180}"
+BREAKER_TTL_SEC="${REVIEW_BREAKER_TTL:-10800}"
+BREAKER_FILE="${REVIEW_BREAKER_FILE:-${LOCK_DIR}/opencode-review-primary-capped}"
 MIN_MEM_MB="${REVIEW_MIN_MEM_MB:-1536}"
 MAX_LOAD_PER_CPU="${REVIEW_MAX_LOAD_PER_CPU:-2.5}"
 MAX_IO_FULL="${REVIEW_MAX_IO_FULL:-25}"
@@ -33,15 +46,21 @@ MAX_IO_FULL="${REVIEW_MAX_IO_FULL:-25}"
 mkdir -p "$REVIEW_OUT_DIR"
 export PATH="${HOME}/.opencode/bin:${PATH}"
 
-write_status() { # status reason
+write_status() { # status reason [model] [note]
   # python does the JSON encoding: the reason carries untrusted provider/model
   # output (backslashes, control chars, bytes cut mid-UTF-8 by the fallback
   # trim) that printf-style escaping cannot make valid JSON.
-  python3 - "$1" "$2" <<'PY' > "${REVIEW_OUT_DIR}/status.json"
+  python3 - "$@" <<'PY' > "${REVIEW_OUT_DIR}/status.json"
 import json, sys
-print(json.dumps({"status": sys.argv[1], "reason": sys.argv[2]}))
+data = {"status": sys.argv[1], "reason": sys.argv[2]}
+if len(sys.argv) > 3 and sys.argv[3]:
+    data["model"] = sys.argv[3]
+if len(sys.argv) > 4 and sys.argv[4]:
+    data["note"] = sys.argv[4]
+print(json.dumps(data))
 PY
   echo "status=$1" >> "${GITHUB_OUTPUT:-/dev/null}"
+  if [ "${3:-}" ]; then echo "model=$3" >> "${GITHUB_OUTPUT:-/dev/null}"; fi
 }
 
 # Prints a reason and returns 1 when the host is too busy to start a review.
@@ -137,11 +156,6 @@ export OPENCODE_DISABLE_AUTOUPDATE=1
 # servers and outranks the inline config above; verified on the VM. Ignore it.
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
 
-# Transient provider/network failures (observed 2026-10: ECONNRESET-class
-# exits after ~90 s with empty stderr, 9 of 39 failed runs) get one retry.
-# An attempt that already burned the full RUN_TIMEOUT_SEC is not retried: it
-# keeps the runner's single CI slot busy long enough, and the next push (or a
-# manual re-run) retries the review anyway.
 failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
   if (( "$1" == 124 )); then
     printf 'opencode timed out after %ss' "$RUN_TIMEOUT_SEC"
@@ -158,37 +172,141 @@ failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
   printf 'opencode exited with %s after %ss%s' "$1" "$2" "${detail:+: ${detail}}"
 }
 
-opencode --version
-rc=0
+# Usage-limit failures advance the model chain without a same-model retry: the
+# provider's window will not recover inside this run. Matched against the
+# failure detail (stderr tail or last event line).
+is_quota_failure() { # $1 = failure detail text
+  printf '%s' "$1" | grep -qiE '429|rate.?limit|usage.?limit|quota|insufficient|billing|balance|limit has been reached'
+}
+
+models=()
+IFS=',' read -r -a raw_models <<< "${REVIEW_MODELS//[[:space:]]/}"
+for m in "${raw_models[@]}"; do
+  [ -n "$m" ] && models+=("$m")
+done
+if [ "${#models[@]}" -eq 0 ]; then
+  echo "::error::model chain '${REVIEW_MODELS}' parsed to an empty list"
+  write_status failed "model chain '${REVIEW_MODELS}' is empty"
+  exit 1
+fi
+for m in "${models[@]}"; do
+  if ! [[ "$m" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._#-]+$ ]]; then
+    echo "::error::model '${m}' is not in provider/id form"
+    write_status failed "model '${m}' is not in provider/id form"
+    exit 1
+  fi
+done
+
+# Host-local breaker: while fresh, skip the primary (it just reported a usage
+# limit) so this window's reviews start on the fallback tier instead of every
+# one paying the doomed first attempt.
+start_index=0
+breaker_note=""
+skip_failures=()
+if (( BREAKER_TTL_SEC > 0 && ${#models[@]} > 1 )) && [ -f "$BREAKER_FILE" ]; then
+  opened_at="$(cat "$BREAKER_FILE" 2>/dev/null || true)"
+  now="$(date +%s)"
+  if [ -n "${opened_at:-}" ] && [ "${opened_at}" -eq "${opened_at}" ] 2>/dev/null \
+     && (( now - opened_at < BREAKER_TTL_SEC )); then
+    start_index=1
+    breaker_note="primary ${models[0]} skipped: usage-limit breaker open for $(( opened_at + BREAKER_TTL_SEC - now ))s more"
+    echo "${breaker_note}" >&2
+    skip_failures=("primary ${models[0]}: skipped, usage-limit breaker open")
+  else
+    rm -f "$BREAKER_FILE" 2>/dev/null || true
+  fi
+fi
+
+# OpenCode 1.x needs --pure for a config-free run; 2.x removed the flag (the
+# inline config governs either way). Detect once instead of pinning a CLI generation.
+PURE_FLAG=()
+if opencode run --help 2>&1 | grep -q -- '--pure'; then
+  PURE_FLAG=(--pure)
+fi
+
+opencode --version >&2
+
+rc=1
 elapsed=0
-attempt=1
-while (( attempt <= ATTEMPTS )); do
-  if (( attempt > 1 )); then
-    echo "retrying opencode run (attempt ${attempt}/${ATTEMPTS}) after ${RETRY_BACKOFF_SEC}s backoff" >&2
-    sleep "$RETRY_BACKOFF_SEC"
-  fi
-  started="$SECONDS"
-  set +e
-  timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json --pure \
-    --model "$REVIEW_MODEL" "$(cat "${REVIEW_OUT_DIR}/prompt.md")" \
-    {lock_fd}>&- < /dev/null > "${REVIEW_OUT_DIR}/events.jsonl" 2> "${REVIEW_OUT_DIR}/opencode.err"
-  rc=$?
-  set -e
-  elapsed=$(( SECONDS - started ))
-  if (( rc == 0 )); then break; fi
-  if (( attempt < ATTEMPTS && elapsed < RETRY_IF_DIED_UNDER_SEC )); then
-    echo "::warning::$(failure_detail "$rc" "$elapsed"); retrying" >&2
+ran_model=""
+failures=("${skip_failures[@]}")
+for (( mi = start_index; mi < ${#models[@]}; mi++ )); do
+  model="${models[mi]}"
+  attempt=1
+  while (( attempt <= ATTEMPTS )); do
+    if (( attempt > 1 )); then
+      echo "retrying ${model} (attempt ${attempt}/${ATTEMPTS}) after ${RETRY_BACKOFF_SEC}s backoff" >&2
+      sleep "$RETRY_BACKOFF_SEC"
+    fi
+    started="$SECONDS"
+    set +e
+    timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json ${PURE_FLAG[@]+"${PURE_FLAG[@]}"} \
+      --model "$model" "$(cat "${REVIEW_OUT_DIR}/prompt.md")" \
+      {lock_fd}>&- < /dev/null > "${REVIEW_OUT_DIR}/events.jsonl" 2> "${REVIEW_OUT_DIR}/opencode.err"
+    rc=$?
+    set -e
+    elapsed=$(( SECONDS - started ))
+    (( rc == 0 )) && break
+
+    detail="$(failure_detail "$rc" "$elapsed")"
+
+    # A full run timeout is neither retried nor escalated: it already held the
+    # host's single CI slot long enough, and the next push retries anyway.
+    if (( rc == 124 )); then
+      echo "::error::${detail}" >&2
+      write_status failed "${detail}" "$model"
+      exit 1
+    fi
+
+    # Transient provider/network failures (observed 2026-10: ECONNRESET-class
+    # exits after ~90 s with empty stderr) get one same-model retry; quota
+    # failures do not — they advance the chain instead.
+    if (( attempt < ATTEMPTS )) && ! is_quota_failure "$detail" \
+       && (( elapsed < RETRY_IF_DIED_UNDER_SEC )); then
+      echo "::warning::${detail}; retrying ${model}" >&2
+      tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
+      attempt=$(( attempt + 1 ))
+      continue
+    fi
+    echo "::error::${model}: ${detail}" >&2
     tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
-    attempt=$(( attempt + 1 ))
-    continue
+    break
+  done
+
+  if (( rc == 0 )); then
+    ran_model="$model"
+    break
   fi
-  echo "::error::$(failure_detail "$rc" "$elapsed")" >&2
-  tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
-  break
+
+  failures+=("${model}: ${detail}")
+
+  # Only a quota-class failure on the primary opens the breaker, and only when
+  # a fallback exists to catch this and the window's next reviews.
+  if (( mi == 0 && BREAKER_TTL_SEC > 0 && ${#models[@]} > 1 )) && is_quota_failure "$detail"; then
+    date +%s > "$BREAKER_FILE" 2>/dev/null || true
+    echo "primary looks usage-capped; breaker open for ${BREAKER_TTL_SEC}s so next reviews start on the fallback" >&2
+  fi
+
+  if (( mi + 1 < ${#models[@]} )); then
+    echo "::warning::${model} failed; falling back to ${models[mi + 1]}" >&2
+  fi
 done
 
 if (( rc != 0 )); then
-  write_status failed "$(failure_detail "$rc" "$elapsed") (attempt ${attempt}/${ATTEMPTS})"
+  all_failed="$(printf '%s | ' "${failures[@]}")"
+  write_status failed "all models in the chain failed: ${all_failed% | }" "${models[${#models[@]} - 1]}"
   exit 1
 fi
-write_status ran ""
+
+note=""
+if [ -n "$breaker_note" ]; then
+  note="${breaker_note}"
+fi
+if [ "$ran_model" != "${models[0]}" ]; then
+  note="${note:+${note}; }reviewed on fallback ${ran_model}"
+fi
+# A healthy primary clears the breaker for the next reviews.
+if [ "$ran_model" = "${models[0]}" ] && [ -f "$BREAKER_FILE" ]; then
+  rm -f "$BREAKER_FILE" 2>/dev/null || true
+fi
+write_status ran "" "$ran_model" "$note"
