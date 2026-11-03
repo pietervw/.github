@@ -76,8 +76,10 @@ IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
 (720), `REVIEW_ATTEMPTS` (2, per model), `REVIEW_RETRY_BACKOFF_SEC` (30),
 `REVIEW_RETRY_IF_DIED_UNDER` (180, seconds; only attempts that fail faster
 than this are retried — a full 720 s timeout is not, to free the CI slot),
-`REVIEW_BREAKER_TTL` (10800, seconds the primary is skipped after a quota
-failure; 0 disables), `REVIEW_LOCK_DIR` (`/tmp`). The default breaker file
+`REVIEW_BREAKER_TTL` (1800, seconds the primary is skipped after a quota
+failure; 0 disables — short because a re-probe of a still-capped primary
+costs seconds and the review still completes on a fallback, while a stale
+breaker costs weaker free-tier reviews for its whole TTL), `REVIEW_LOCK_DIR` (`/tmp`). The default breaker file
 is scoped to the primary API key (short hash) so rotating keys does not
 carry breaker state over; `REVIEW_BREAKER_FILE` overrides the whole path.
 
