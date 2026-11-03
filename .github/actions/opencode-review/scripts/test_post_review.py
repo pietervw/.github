@@ -190,6 +190,13 @@ class SummaryTests(unittest.TestCase):
         text = pr.render_summary(args, "ran", "", {"summary": "S", "verdict": "no_issues", "findings": []}, [], "")
         self.assertIn("model `m` · fallback used", text)
 
+    def test_meta_line_omits_model_when_none_ran(self):
+        # Capped/busy posts name no model — no model reviewed the commit.
+        args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="", run_url="")
+        text = pr.render_summary(args, "capped", "", None, [], "")
+        self.assertTrue(text.startswith("### OpenCode review") or "Commit `" in text)
+        self.assertNotIn("model `", text)
+
 
 class RoundTests(unittest.TestCase):
     args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", max_rounds=3)

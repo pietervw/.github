@@ -77,16 +77,27 @@ IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
 `REVIEW_RETRY_IF_DIED_UNDER` (180, seconds; only attempts that fail faster
 than this are retried — a full 720 s timeout is not, to free the CI slot),
 `REVIEW_BREAKER_TTL` (10800, seconds the primary is skipped after a quota
-failure; 0 disables), `REVIEW_LOCK_DIR` (`/tmp`).
+failure; 0 disables), `REVIEW_LOCK_DIR` (`/tmp`). The default breaker file
+is scoped to the primary API key (short hash) so rotating keys does not
+carry breaker state over; `REVIEW_BREAKER_FILE` overrides the whole path.
 
-Total time is bounded: the capacity wait (`wait-seconds`, 600) plus a quick
-failed attempt (< 180) + backoff (30) plus one full run timeout (720 + up to
-30 s kill-after grace) on the final attempt is ≈ 1560 s — under the 2100 s
-runner watchdog and the 90-minute job timeout, which includes queueing for
-the runner's single CI slot (that queue, not the run, is what produced the
-5700 s worst-case check in the 2026-10-28 retro). The model chain only spends
-extra time when earlier entries fail fast (quota errors die in seconds), and
-the breaker keeps later reviews in the window from even paying that.
+Chain walking: a quota-class failure advances immediately (no retry); any
+other sub-180 s failure gets one same-model retry and then advances too; a
+full run timeout stops the run (it already held the CI slot long enough).
+Only a quota-class failure of the primary opens the breaker.
+
+Time is bounded per model by its attempts: either one slow non-timeout
+death (just under `REVIEW_RUN_TIMEOUT_SEC`, 720) or two quick deaths
+(< 180 s each plus 30 s backoff); a death at the full timeout exits the run
+instead of advancing. So the chain's worst case is the capacity wait
+(`wait-seconds`, 600) plus ~3 × 820 s ≈ 71 min — and the job's
+`timeout-minutes` (20 in the inlined callers) is the practical ceiling: a
+chain of slow failures presents as a job timeout, i.e. a failed run, not a
+hang. The 2100 s runner watchdog and 90-minute job timeout (which includes
+queueing for the runner's single CI slot — the 5700 s worst case in the
+2026-10-28 retro was queue, not run) still stand. In practice only quota
+errors walk the chain, and those die in seconds; the breaker keeps later
+reviews in the window from even paying that.
 
 ## Tests
 

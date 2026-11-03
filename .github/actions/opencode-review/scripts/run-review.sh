@@ -35,10 +35,18 @@ WAIT_SEC="${REVIEW_WAIT_SEC:-600}"
 POLL_SEC="${REVIEW_POLL_SEC:-30}"
 RUN_TIMEOUT_SEC="${REVIEW_RUN_TIMEOUT_SEC:-720}"
 ATTEMPTS="${REVIEW_ATTEMPTS:-2}"
-RETRY_BACKOFF_SEC="${RETRY_BACKOFF_SEC:-30}"
+RETRY_BACKOFF_SEC="${REVIEW_RETRY_BACKOFF_SEC:-30}"
 RETRY_IF_DIED_UNDER_SEC="${REVIEW_RETRY_IF_DIED_UNDER:-180}"
 BREAKER_TTL_SEC="${REVIEW_BREAKER_TTL:-10800}"
-BREAKER_FILE="${REVIEW_BREAKER_FILE:-${LOCK_DIR}/opencode-review-primary-capped}"
+# Scope the default breaker file to the primary API key (short hash, never the
+# key itself) so rotating or alternating keys does not carry breaker state over;
+# REVIEW_BREAKER_FILE remains an explicit override.
+BREAKER_FILE="${REVIEW_BREAKER_FILE:-}"
+if [ -z "${BREAKER_FILE}" ]; then
+  key_id=""
+  [ -n "${ZHIPU_API_KEY:-}" ] && key_id="-$(printf '%s' "${ZHIPU_API_KEY}" | sha256sum | cut -c1-8)"
+  BREAKER_FILE="${LOCK_DIR}/opencode-review-primary-capped${key_id}"
+fi
 MIN_MEM_MB="${REVIEW_MIN_MEM_MB:-1536}"
 MAX_LOAD_PER_CPU="${REVIEW_MAX_LOAD_PER_CPU:-2.5}"
 MAX_IO_FULL="${REVIEW_MAX_IO_FULL:-25}"
@@ -156,11 +164,7 @@ export OPENCODE_DISABLE_AUTOUPDATE=1
 # servers and outranks the inline config above; verified on the VM. Ignore it.
 export OPENCODE_DISABLE_PROJECT_CONFIG=1
 
-failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
-  if (( "$1" == 124 )); then
-    printf 'opencode timed out after %ss' "$RUN_TIMEOUT_SEC"
-    return
-  fi
+last_error_detail() { # stderr tail, or the last event line when stderr is empty
   local detail
   detail="$(grep -v '^[[:space:]]*$' "${REVIEW_OUT_DIR}/opencode.err" 2>/dev/null | tail -n 1 | tr -d '\n' || true)"
   if [ -z "$detail" ]; then
@@ -169,13 +173,23 @@ failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
   else
     detail="${detail:0:300}"
   fi
+  printf '%s' "$detail"
+}
+
+failure_detail() { # $1 = exit code, $2 = elapsed seconds of that attempt
+  if (( "$1" == 124 )); then
+    printf 'opencode timed out after %ss' "$RUN_TIMEOUT_SEC"
+    return
+  fi
+  local detail; detail="$(last_error_detail)"
   printf 'opencode exited with %s after %ss%s' "$1" "$2" "${detail:+: ${detail}}"
 }
 
 # Usage-limit failures advance the model chain without a same-model retry: the
-# provider's window will not recover inside this run. Matched against the
-# failure detail (stderr tail or last event line).
-is_quota_failure() { # $1 = failure detail text
+# provider's window will not recover inside this run. Matched against the error
+# text only (never the exit-code/elapsed wrapper), so an elapsed time like
+# "after 429s" cannot trip it.
+is_quota_failure() { # $1 = error text
   printf '%s' "$1" | grep -qiE '429|rate.?limit|usage.?limit|quota|insufficient|billing|balance|limit has been reached'
 }
 
@@ -249,6 +263,7 @@ for (( mi = start_index; mi < ${#models[@]}; mi++ )); do
     (( rc == 0 )) && break
 
     detail="$(failure_detail "$rc" "$elapsed")"
+    err_text="$(last_error_detail)"
 
     # A full run timeout is neither retried nor escalated: it already held the
     # host's single CI slot long enough, and the next push retries anyway.
@@ -261,14 +276,20 @@ for (( mi = start_index; mi < ${#models[@]}; mi++ )); do
     # Transient provider/network failures (observed 2026-10: ECONNRESET-class
     # exits after ~90 s with empty stderr) get one same-model retry; quota
     # failures do not — they advance the chain instead.
-    if (( attempt < ATTEMPTS )) && ! is_quota_failure "$detail" \
+    if (( attempt < ATTEMPTS )) && ! is_quota_failure "$err_text" \
        && (( elapsed < RETRY_IF_DIED_UNDER_SEC )); then
       echo "::warning::${detail}; retrying ${model}" >&2
       tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
       attempt=$(( attempt + 1 ))
       continue
     fi
-    echo "::error::${model}: ${detail}" >&2
+    # A model giving up is only an error when nothing remains to catch it;
+    # otherwise it is a warning (the run can still succeed on a fallback).
+    if (( mi + 1 < ${#models[@]} )); then
+      echo "::warning::${model}: ${detail}" >&2
+    else
+      echo "::error::${model}: ${detail}" >&2
+    fi
     tail -n 20 "${REVIEW_OUT_DIR}/opencode.err" >&2 || true
     break
   done
@@ -282,7 +303,7 @@ for (( mi = start_index; mi < ${#models[@]}; mi++ )); do
 
   # Only a quota-class failure on the primary opens the breaker, and only when
   # a fallback exists to catch this and the window's next reviews.
-  if (( mi == 0 && BREAKER_TTL_SEC > 0 && ${#models[@]} > 1 )) && is_quota_failure "$detail"; then
+  if (( mi == 0 && BREAKER_TTL_SEC > 0 && ${#models[@]} > 1 )) && is_quota_failure "$err_text"; then
     date +%s > "$BREAKER_FILE" 2>/dev/null || true
     echo "primary looks usage-capped; breaker open for ${BREAKER_TTL_SEC}s so next reviews start on the fallback" >&2
   fi

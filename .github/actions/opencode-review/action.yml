@@ -65,7 +65,7 @@ runs:
         current="$(opencode --version 2>/dev/null || true)"
         current="${current#v}"
         if [ -z "${current}" ]; then
-          echo "::error::OpenCode CLI not found in PATH or ${bin_dir}. It is host-managed: install it on the runner host as the runner user. This action never downloads binaries."
+          echo "::error::OpenCode CLI not found in PATH or ${bin_dir}. It is host-managed: install it on the runner host as the runner user (hosted ubuntu-latest runners do not have it — set the repo's RUNNER variable to a self-hosted runner that does). This action never downloads binaries."
           exit 1
         fi
         pin="${CLI_PIN:-host}"
@@ -132,7 +132,6 @@ runs:
         RUN_STATUS: ${{ steps.run.outputs.status }}
         PR_NUMBER: ${{ github.event.pull_request.number }}
         PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        REVIEW_MODELS: ${{ inputs.model != '' && inputs.model || inputs.models }}
         RUN_MODEL: ${{ steps.run.outputs.model }}
         REVIEW_MAX_ROUNDS: ${{ inputs.max-rounds }}
       run: |
@@ -140,9 +139,14 @@ runs:
         out_dir="${RUNNER_TEMP}/opencode-review"
         max_rounds="${REVIEW_MAX_ROUNDS:-3}"
         [[ "${max_rounds}" =~ ^[0-9]+$ ]] || max_rounds="3"
-        # Which tier actually reviewed: from the run step when it got that far,
-        # otherwise the primary (head of the chain).
-        review_model="${RUN_MODEL:-${REVIEW_MODELS%%,*}}"
+        # Which tier actually reviewed: only when the run step recorded one
+        # (a model really attempted the review). Capped/busy posts name no
+        # model — none reviewed.
+        review_model="${RUN_MODEL:-}"
+        model_args=()
+        if [ -n "${review_model}" ]; then
+          model_args=(--model "${review_model}")
+        fi
         review_note=""
         if [ -f "${out_dir}/status.json" ]; then
           review_note="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("note",""))' "${out_dir}/status.json" 2>/dev/null)" || review_note=""
@@ -154,7 +158,7 @@ runs:
         if [ "${{ steps.roundcap.outputs.capped }}" = "true" ]; then
           python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
             --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
-            --sha "${PR_HEAD_SHA}" --model "${review_model}" \
+            --sha "${PR_HEAD_SHA}" "${model_args[@]}" \
             --status capped --max-rounds "${max_rounds}" \
             --out-dir "${out_dir}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -173,7 +177,7 @@ runs:
         [ "${RUN_OUTCOME}" = "success" ] || { status="failed"; reason="${reason:-the review step failed before producing a result}"; }
         python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
           --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
-          --sha "${PR_HEAD_SHA}" --model "${review_model}" \
+          --sha "${PR_HEAD_SHA}" "${model_args[@]}" \
           --status "${status}" --reason "${reason}" --out-dir "${out_dir}" \
           --max-rounds "${max_rounds}" "${note_args[@]}" \
           --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

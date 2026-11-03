@@ -17,6 +17,13 @@ on:
           earlier one fails with a usage limit (429/quota/billing).
         type: string
         default: zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free
+      cli-version:
+        description: >-
+          "host" (default) runs whatever CLI the runner host has installed; an
+          exact version must match or the step fails. Forwarded to the action,
+          which verifies but never installs the CLI.
+        type: string
+        default: host
       max-rounds:
         description: Completed review rounds allowed per PR before auto-review stops (0 = unlimited)
         type: string
@@ -50,4 +57,5 @@ jobs:
           api-key: ${{ secrets.ZHIPU_API_KEY }}
           model: ${{ inputs.model }}
           models: ${{ inputs.models }}
+          cli-version: ${{ inputs.cli-version }}
           max-rounds: ${{ inputs.max-rounds }}

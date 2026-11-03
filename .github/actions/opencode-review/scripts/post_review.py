@@ -196,7 +196,9 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
     head = [SUMMARY_MARKER, result, "## OpenCode review", ""]
     if round_num is not None:
         head.insert(1, ROUND_MARKER_FMT.format(n=round_num))
-    meta = f"Commit `{short}` · model `{args.model}`"
+    meta = f"Commit `{short}`"
+    if getattr(args, "model", ""):
+        meta += f" · model `{args.model}`"
     if getattr(args, "note", ""):
         meta += f" · {args.note}"
     if round_num is not None and round_num >= 1:
