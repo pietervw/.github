@@ -64,19 +64,6 @@ jobs:
       models: "zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free"
 ```
 
-4. Optional: override the model chain (default `zai-coding-plan/glm-5.3,
-   opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free`). Later
-   entries are used when earlier ones fail with a usage limit; the free
-   entries need no API key:
-
-```yaml
-    with:
-      models: "zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free"
-```
-
-   The old `model:` input is a deprecated single-model pin: setting it
-   replaces the whole chain and disables fallback.
-
 The cap applies to the automatic on-push review only; a requested
 `@opencode review` still runs.
 

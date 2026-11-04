@@ -223,6 +223,7 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
         return "\n".join(head + body + foot)
     if status == "busy":
         body = [f"**Review skipped:** the review host was busy ({reason}).",
+                "The check is marked failing on purpose: a PR without a review must not read green.",
                 "Push a commit, mark the PR ready for review again, or re-run the workflow to retry."]
         return "\n".join(head + body + foot)
     if status == "failed":

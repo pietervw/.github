@@ -185,6 +185,13 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("not a clean review", unparsed)
         self.assertNotIn("No issues found", unparsed)
 
+    def test_busy_summary_explains_the_deliberately_red_check(self):
+        text = self.render("busy", reason="available memory 398MB < 1536MB")
+        self.assertIn("Review skipped", text)
+        self.assertIn("398MB", text)
+        self.assertIn("failing on purpose", text)
+        self.assertIn("re-run the workflow", text)
+
     def test_note_lands_in_meta_line(self):
         args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", note="fallback used")
         text = pr.render_summary(args, "ran", "", {"summary": "S", "verdict": "no_issues", "findings": []}, [], "")
