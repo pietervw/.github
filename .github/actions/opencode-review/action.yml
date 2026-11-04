@@ -1,8 +1,10 @@
 name: OpenCode PR review
 description: >-
   Read-only OpenCode review of the checked-out pull request. Waits for host capacity,
-  then posts one updatable summary comment plus inline comments. Never approves,
-  merges, or pushes. Caller must check out the PR head with fetch-depth 0 first.
+  then posts one updatable summary comment plus inline comments. A capacity skip
+  fails the check — an unreviewed PR must not read green — while the PR comment
+  explains the skip. Never approves, merges, or pushes. Caller must check out
+  the PR head with fetch-depth 0 first.
 
 inputs:
   api-key:
@@ -43,7 +45,7 @@ inputs:
     required: false
     default: "3"
   wait-seconds:
-    description: How long to wait for host capacity before skipping with a notice
+    description: How long to wait for host capacity before skipping (the check then fails; the PR comment explains why)
     required: false
     default: "600"
   github-token:
@@ -174,7 +176,13 @@ runs:
           echo "Review run was cancelled; not posting."
           exit 0
         fi
-        [ "${RUN_OUTCOME}" = "success" ] || { status="failed"; reason="${reason:-the review step failed before producing a result}"; }
+        # The busy skip exits the run step non-zero on purpose (a skip must not
+        # read green); keep its busy status so the comment says skipped and
+        # keeps the how-to-retry guidance instead of relabelling it failed.
+        if [ "${RUN_OUTCOME}" != "success" ] && [ "${status}" != "busy" ]; then
+          status="failed"
+          reason="${reason:-the review step failed before producing a result}"
+        fi
         python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py" \
           --repo "${GITHUB_REPOSITORY}" --pr "${PR_NUMBER}" \
           --sha "${PR_HEAD_SHA}" "${model_args[@]}" \

@@ -4,7 +4,9 @@
 # Holds a review lock for the whole run, so at most REVIEW_MAX_CONCURRENT reviews
 # run at once on the host (the runner's own CI slot hook limits all jobs; this
 # caps reviews specifically). If the host stays busy for REVIEW_WAIT_SEC the
-# review is skipped with a notice instead of overloading it.
+# review is skipped with a notice instead of overloading it — and exits
+# non-zero, so an unreviewed PR never reads green (the posting step still turns
+# the busy status into the explanatory PR comment).
 #
 # REVIEW_MODELS is a comma-separated chain: the first entry is the primary
 # (paid z.ai coding plan), later entries are keyless OpenCode free-tier
@@ -22,7 +24,8 @@
 # This step never sees GITHUB_TOKEN: posting is a separate step.
 #
 # Writes to $REVIEW_OUT_DIR: events.jsonl, opencode.err, status.json
-# Exit 0 for ran or skipped-busy, non-zero for a failed run.
+# Exit 0 only for a completed review; a host-busy skip and a failed run both
+# exit non-zero so the check never reads green without a review.
 set -euo pipefail
 
 : "${REVIEW_OUT_DIR:?}" "${REVIEW_PROMPT_FILE:?}" "${PR_BASE_REF:?}"
@@ -48,6 +51,9 @@ if [ -z "${BREAKER_FILE}" ]; then
   BREAKER_FILE="${LOCK_DIR}/opencode-review-primary-capped${key_id}"
 fi
 MIN_MEM_MB="${REVIEW_MIN_MEM_MB:-1536}"
+# Memory-probe source. The override lets tests simulate a starved host from a
+# fixture file without creating real memory pressure on the box.
+MEMINFO_FILE="${REVIEW_MEMINFO_FILE:-/proc/meminfo}"
 MAX_LOAD_PER_CPU="${REVIEW_MAX_LOAD_PER_CPU:-2.5}"
 MAX_IO_FULL="${REVIEW_MAX_IO_FULL:-25}"
 
@@ -74,7 +80,8 @@ PY
 # Prints a reason and returns 1 when the host is too busy to start a review.
 host_busy() {
   local mem load5 ncpu io
-  mem="$(awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminfo)"
+  mem="$(awk '/^MemAvailable:/ {print int($2/1024)}' "${MEMINFO_FILE}")"
+  mem="${mem:-0}" # an unreadable probe reads busy, never green
   load5="$(cut -d' ' -f2 /proc/loadavg)"
   ncpu="$(nproc)"
   io="$(awk '/^full/ {for (i = 2; i <= NF; i++) if ($i ~ /^avg10=/) {sub("avg10=", "", $i); print $i}}' /proc/pressure/io 2>/dev/null || true)"
@@ -118,9 +125,12 @@ while true; do
     break
   fi
   if (( SECONDS >= deadline )); then
-    echo "::warning::OpenCode review skipped, host busy after ${WAIT_SEC}s: ${reason}"
+    # Fail the check on purpose: a skip that exits 0 reads as a green review
+    # (seen twice on Tickaboard #15). The busy status still drives the
+    # explanatory PR comment from the posting step.
+    echo "::error::OpenCode review skipped, host busy after ${WAIT_SEC}s: ${reason} (check fails on purpose: an unreviewed PR must not read green)"
     write_status busy "$reason"
-    exit 0
+    exit 1
   fi
   echo "waiting for capacity (${reason}); retry in ${POLL_SEC}s" >&2
   sleep "$POLL_SEC"

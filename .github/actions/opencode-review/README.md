@@ -12,7 +12,12 @@ models (see the `models` input), so a capped z.ai window no longer fails reviews
    skips drafts, fork PRs and Dependabot.
 2. `scripts/run-review.sh` waits for host capacity (memory, load, IO pressure,
    and a review lock of `max-concurrent` slots, default 1). If the host is still
-   busy after `wait-seconds` (default 600) it skips and says so on the PR.
+   busy after `wait-seconds` (default 600) it skips, says so on the PR, **and
+   fails the check** — a PR that was not reviewed must never read green
+   (issue #8: two Tickaboard #15 runs skipped at 398/584 MB free and the check
+   showed SUCCESS). The busy comment explains the deliberately red check and
+   how to retry; busy runs do not consume a review round and never count as
+   clean for the automerge gate.
 3. OpenCode runs with read-only tools: no shell, no edits, no network, no paths
    outside the workspace. It reads the diff from `.opencode-review/diff.patch`
    (git-excluded). This step gets only the z.ai key, never `GITHUB_TOKEN`.
@@ -64,6 +69,21 @@ Repos call the reusable workflow `.github/workflows/opencode-review.yml` in this
 repo; see the root README for the caller and the rollout requirements
 (`RUNNER` variable, `ZHIPU_API_KEY` secret).
 
+## Versioning: `v1` is a moving tag
+
+Callers pin `pietervw/.github/.github/actions/opencode-review@v1` (or the
+reusable workflow `@v1`). `v1` is a **moving tag that tracks `main`**: it is
+re-cut to the merged `main` head after every change ("Releasing a change" in
+the root README), so a caller gets the current behaviour without edits — and
+can also change under a caller without edits. Pin a commit SHA instead if a
+repo needs to freeze behaviour.
+
+`v2` existed briefly and was **deleted on 2026-11-03**. Branches (and open PRs
+created before the re-cut) that pin `@v2` fail immediately at the *Set up job*
+step with "unable to resolve action `pietervw/.github@v2`" — the tag no longer
+resolves. Fix by repinning the caller to `@v1` (or a SHA) and re-running; do
+not recreate `v2`.
+
 ## Tuning
 
 Inputs: `models` (chain; `model` is a deprecated single-model pin that disables
@@ -82,6 +102,10 @@ costs seconds and the review still completes on a fallback, while a stale
 breaker costs weaker free-tier reviews for its whole TTL), `REVIEW_LOCK_DIR` (`/tmp`). The default breaker file
 is scoped to the primary API key (short hash) so rotating keys does not
 carry breaker state over; `REVIEW_BREAKER_FILE` overrides the whole path.
+`REVIEW_MEMINFO_FILE` (`/proc/meminfo`) is the memory-probe source — a test
+hook so the busy path can be exercised from a fixture file without creating
+real memory pressure on the host; an unreadable or unparsable probe reads
+busy (0 MB), never green.
 
 Chain walking: a quota-class failure advances immediately (no retry); any
 other sub-180 s failure gets one same-model retry and then advances too; a
@@ -106,3 +130,9 @@ reviews in the window from even paying that.
 ```
 python3 -m unittest discover -s .github/actions/opencode-review/scripts
 ```
+
+Besides the posting unit tests, `test_run_review.py` drives `run-review.sh`
+end to end: fixture `/proc/meminfo` files (via `REVIEW_MEMINFO_FILE`) exercise
+the busy skip without starving the host, and a scripted `opencode` stub pins
+the exit-code contract (busy skip fails, healthy run exits 0) plus the
+retry / quota-fallback / breaker behaviour.

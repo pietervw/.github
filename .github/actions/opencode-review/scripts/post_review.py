@@ -222,7 +222,14 @@ def render_summary(args, status, reason, review, findings, raw_text, round_num=N
                 "in repos that have the mention workflow)."]
         return "\n".join(head + body + foot)
     if status == "busy":
+        # Not the standard footer: where the review check is required, this red
+        # check does block the merge — on purpose. Say so instead of implying
+        # the review never blocks anything.
+        foot = ["", "---",
+                "_Automated, advisory review. It does not approve or change this PR. "
+                "The red check is the skip itself and clears as soon as a review runs._"]
         body = [f"**Review skipped:** the review host was busy ({reason}).",
+                "The check is marked failing on purpose: a PR without a review must not read green.",
                 "Push a commit, mark the PR ready for review again, or re-run the workflow to retry."]
         return "\n".join(head + body + foot)
     if status == "failed":
