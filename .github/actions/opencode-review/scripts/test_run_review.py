@@ -12,11 +12,13 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import unittest
 
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 RUN_REVIEW = os.path.join(SCRIPTS, "run-review.sh")
 REVIEW_PROMPT = os.path.join(os.path.dirname(SCRIPTS), "review-prompt.md")
+ACTION_YML = os.path.join(os.path.dirname(SCRIPTS), "action.yml")
 
 # 388MB available (Tickaboard #15 saw 398MB and 584MB): always under the 1536MB gate.
 MEMINFO_BUSY = "MemTotal:       4000000 kB\nMemFree:         100000 kB\nMemAvailable:    398000 kB\n"
@@ -111,7 +113,7 @@ class RunReviewHarness(unittest.TestCase):
             handle.write(text)
         return path
 
-    def run_review(self, meminfo, **overrides):
+    def review_env(self, meminfo, **overrides):
         env = {
             **os.environ,
             "PATH": self.bin + os.pathsep + os.environ.get("PATH", ""),
@@ -139,8 +141,9 @@ class RunReviewHarness(unittest.TestCase):
             "FAKE_OPENCODE_EVENTS": self.events,
         }
         env.update({key: str(value) for key, value in overrides.items()})
-        proc = subprocess.run(["bash", RUN_REVIEW], cwd=self.repo, env=env,
-                              capture_output=True, text=True, timeout=120)
+        return env
+
+    def collect(self, proc, env):
         self.proc = proc
         output_path = env["GITHUB_OUTPUT"]
         self.github_output = ""
@@ -153,6 +156,12 @@ class RunReviewHarness(unittest.TestCase):
             with open(status_path, encoding="utf-8") as handle:
                 self.status = json.load(handle)
         return proc
+
+    def run_review(self, meminfo, **overrides):
+        env = self.review_env(meminfo, **overrides)
+        proc = subprocess.run(["bash", RUN_REVIEW], cwd=self.repo, env=env,
+                              capture_output=True, text=True, timeout=120)
+        return self.collect(proc, env)
 
     def calls(self, model):
         path = os.path.join(self.state, "counts", model.replace("/", "_"))
@@ -169,6 +178,9 @@ class RunReviewHarness(unittest.TestCase):
         self.assertIn("< 1536MB", self.status["reason"])
         self.assertIn("status=busy", self.github_output)
         self.assertNotIn("status=ran", self.github_output)
+        # The skip must be visible as an error in the check output, not a warning.
+        self.assertIn("::error::OpenCode review skipped, host busy", proc.stdout)
+        self.assertNotIn("::warning::OpenCode review skipped", proc.stdout)
         # Nothing ran: no model was ever invoked.
         self.assertFalse(os.path.exists(os.path.join(self.state, "log")))
 
@@ -177,6 +189,32 @@ class RunReviewHarness(unittest.TestCase):
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertEqual(self.status["status"], "busy")
         self.assertGreaterEqual(proc.stderr.count("waiting for capacity"), 1)
+
+    def test_capacity_recovery_during_wait_still_runs_the_review(self):
+        # Busy at the first probe, plenty of memory one second later: the gate
+        # must re-probe and run the review, not skip on the first sample.
+        env = self.review_env(MEMINFO_BUSY, REVIEW_WAIT_SEC="5", REVIEW_POLL_SEC="1")
+        meminfo_path = env["REVIEW_MEMINFO_FILE"]
+
+        def relax():
+            with open(meminfo_path, "w", encoding="utf-8") as handle:
+                handle.write(MEMINFO_OK)
+
+        timer = threading.Timer(1.0, relax)
+        timer.start()
+        try:
+            proc = subprocess.Popen(["bash", RUN_REVIEW], cwd=self.repo, env=env,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = proc.communicate(timeout=120)
+        finally:
+            timer.cancel()
+        proc.stdout, proc.stderr = stdout, stderr
+        self.collect(proc, env)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertEqual(self.status["status"], "ran")
+        self.assertEqual(self.status["model"], "prov/m1")
+        self.assertEqual(self.calls("prov/m1"), 1)
+        self.assertGreaterEqual(stderr.count("waiting for capacity"), 1)
 
     def test_healthy_host_runs_the_review_and_exits_success(self):
         proc = self.run_review(MEMINFO_OK, REVIEW_WAIT_SEC="30")
@@ -210,6 +248,44 @@ class RunReviewHarness(unittest.TestCase):
         self.assertNotIn("note", self.status)
         self.assertEqual(self.calls("prov/m1"), 2)  # quick death retried once
         self.assertEqual(self.calls("prov/m2"), 0)  # retry succeeded: no fallback
+
+
+class PostReviewMappingTests(unittest.TestCase):
+    """The Post review step's outcome-to-status mapping, executed from action.yml itself.
+
+    The busy skip now exits the run step non-zero on purpose; if this mapping
+    ever relabelled busy as failed, the PR comment would lose its skip
+    explanation and retry guidance — the same silent-regression class this
+    change fixes. The block between the two anchors is the real shipped code.
+    """
+
+    def mapping(self, outcome, run_status):
+        with open(ACTION_YML, encoding="utf-8") as handle:
+            text = handle.read()
+        start = text.index('status="${RUN_STATUS:-failed}"')
+        end = text.index('python3 "${GITHUB_ACTION_PATH}/scripts/post_review.py"', start)
+        block = text[start:end]
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(os.path.join(tmp, "status.json"), "w", encoding="utf-8") as handle:
+                json.dump({"status": run_status, "reason": "available memory 398MB < 1536MB"}, handle)
+            script = (f'set -euo pipefail\nout_dir="{tmp}"\nRUN_OUTCOME="{outcome}"\n'
+                      f'RUN_STATUS="{run_status}"\n' + block
+                      + '\nprintf "STATUS=%s|REASON=%s" "$status" "$reason"')
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc.stdout
+
+    def test_busy_skip_keeps_busy_status_despite_failed_outcome(self):
+        out = self.mapping("failure", "busy")
+        self.assertIn("STATUS=busy", out)
+        self.assertIn("available memory 398MB < 1536MB", out)
+
+    def test_real_failures_still_map_to_failed(self):
+        self.assertIn("STATUS=failed", self.mapping("failure", "failed"))
+        self.assertIn("STATUS=failed", self.mapping("failure", ""))
+
+    def test_success_keeps_ran(self):
+        self.assertIn("STATUS=ran", self.mapping("success", "ran"))
 
 
 if __name__ == "__main__":

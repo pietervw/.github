@@ -191,6 +191,10 @@ class SummaryTests(unittest.TestCase):
         self.assertIn("398MB", text)
         self.assertIn("failing on purpose", text)
         self.assertIn("re-run the workflow", text)
+        # The busy footer must not claim the review never blocks: with a
+        # required check, this red check blocks on purpose.
+        self.assertNotIn("does not approve, block, or change", text)
+        self.assertIn("clears as soon as a review runs", text)
 
     def test_note_lands_in_meta_line(self):
         args = argparse.Namespace(repo="o/r", pr=7, sha="a" * 40, model="m", run_url="", note="fallback used")
