@@ -47,7 +47,7 @@ n=$(( $(cat "$state/counts/$key" 2>/dev/null || echo 0) + 1 ))
 echo "$n" > "$state/counts/$key"
 printf '%s\n' "$*" >> "$state/log"
 if [ "${1:-}" = "--version" ]; then echo "1.9.0-fake"; exit 0; fi
-if [ "${2:-}" = "--help" ]; then echo "usage: opencode run [prompt]"; exit 0; fi
+if [ "${2:-}" = "--help" ]; then echo "usage: opencode run [prompt] ${FAKE_HELP_EXTRA:-}"; exit 0; fi
 if [ -n "${FAKE_TRANSIENT_MODEL:-}" ] && [ "${model:-}" = "${FAKE_TRANSIENT_MODEL}" ] \
    && [ "$n" -le "${FAKE_TRANSIENT_TIMES:-0}" ]; then
   echo "error: read tcp: connection reset by peer (ECONNRESET)" >&2
@@ -228,6 +228,19 @@ class RunReviewHarness(unittest.TestCase):
         # The review prompt was built from the diff against the base ref.
         with open(os.path.join(self.out, "prompt.md"), encoding="utf-8") as handle:
             self.assertIn("change.txt", handle.read())
+
+    def test_standalone_flag_used_only_when_the_cli_supports_it(self):
+        proc = self.run_review(MEMINFO_OK, REVIEW_WAIT_SEC="30", FAKE_HELP_EXTRA="--standalone")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.state, "log"), encoding="utf-8") as handle:
+            runs = [line for line in handle if "--model prov/m1" in line]
+        self.assertTrue(runs and all("--standalone" in line for line in runs), runs)
+
+    def test_standalone_flag_omitted_on_clis_without_it(self):
+        proc = self.run_review(MEMINFO_OK, REVIEW_WAIT_SEC="30")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(self.state, "log"), encoding="utf-8") as handle:
+            self.assertNotIn("--standalone", handle.read())
 
     def test_quota_failure_advances_chain_without_retry_and_opens_breaker(self):
         proc = self.run_review(MEMINFO_OK, REVIEW_WAIT_SEC="30", FAKE_QUOTA_MODELS="prov/m1")

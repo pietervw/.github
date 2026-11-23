@@ -22,7 +22,7 @@ inputs:
       (paid z.ai plan); later entries are keyless OpenCode free-tier fallbacks used
       when the primary hits a usage limit.
     required: false
-    default: zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free
+    default: zai-coding-plan/glm-5.4,opencode/deepseek-v4.1-flash-free
   cli-version:
     description: >-
       "host" (default) runs whatever CLI the runner host has installed. An exact
