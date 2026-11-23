@@ -1,7 +1,7 @@
 # OpenCode PR review (reusable composite action)
 
 Read-only, automatic review of ready-for-review pull requests, run by OpenCode
-on a self-hosted runner. The primary model is the paid `zai-coding-plan/glm-5.3`;
+on a self-hosted runner. The primary model is the paid `zai-coding-plan/glm-5.4`;
 when it hits its usage limit the review falls back to keyless OpenCode free-tier
 models (see the `models` input), so a capped z.ai window no longer fails reviews.
 

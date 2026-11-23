@@ -247,6 +247,13 @@ PURE_FLAG=()
 if opencode run --help 2>&1 | grep -q -- '--pure'; then
   PURE_FLAG=(--pure)
 fi
+# 2.x `run` talks to a per-host background service on a fixed port. Another
+# user's service on the same host would answer instead (its config, auth and
+# permissions, not the inline read-only config above), so use a private server.
+STANDALONE_FLAG=()
+if opencode run --help 2>&1 | grep -q -- '--standalone'; then
+  STANDALONE_FLAG=(--standalone)
+fi
 
 opencode --version >&2
 
@@ -264,7 +271,7 @@ for (( mi = start_index; mi < ${#models[@]}; mi++ )); do
     fi
     started="$SECONDS"
     set +e
-    timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json ${PURE_FLAG[@]+"${PURE_FLAG[@]}"} \
+    timeout --kill-after=30 "$RUN_TIMEOUT_SEC" opencode run --format json ${PURE_FLAG[@]+"${PURE_FLAG[@]}"} ${STANDALONE_FLAG[@]+"${STANDALONE_FLAG[@]}"} \
       --model "$model" "$(cat "${REVIEW_OUT_DIR}/prompt.md")" \
       {lock_fd}>&- < /dev/null > "${REVIEW_OUT_DIR}/events.jsonl" 2> "${REVIEW_OUT_DIR}/opencode.err"
     rc=$?

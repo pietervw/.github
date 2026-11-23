@@ -16,7 +16,7 @@ on:
           Comma-separated model chain, primary first; later entries are used when an
           earlier one fails with a usage limit (429/quota/billing).
         type: string
-        default: zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free
+        default: zai-coding-plan/glm-5.4,opencode/deepseek-v4.1-flash-free
       cli-version:
         description: >-
           "host" (default) runs whatever CLI the runner host has installed; an

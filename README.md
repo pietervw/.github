@@ -6,7 +6,7 @@ Shared automation for Pete's repositories.
 
 Automatic, read-only review of ready (non-draft) pull requests by OpenCode
 on the `ubuntu-agents` self-hosted runners. The primary model is the paid
-`zai-coding-plan/glm-5.3`; when it hits its usage limit the review falls back
+`zai-coding-plan/glm-5.4`; when it hits its usage limit the review falls back
 to keyless OpenCode free-tier models, so a capped z.ai window no longer fails
 reviews (which model reviewed is shown in the summary).
 
@@ -54,14 +54,14 @@ jobs:
 ```
 
 4. Optional: override the model chain (default
-   `zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free,opencode/deepseek-v4.1-flash-free`;
+   `zai-coding-plan/glm-5.4,opencode/deepseek-v4.1-flash-free`;
    later entries are keyless free-tier fallbacks used when the primary reports
    a usage limit). The legacy `model:` input still works as a single-model pin
    that disables fallback:
 
 ```yaml
     with:
-      models: "zai-coding-plan/glm-5.3,opencode/glm-5.3-flash-free"
+      models: "zai-coding-plan/glm-5.4,opencode/deepseek-v4.1-flash-free"
 ```
 
 The cap applies to the automatic on-push review only; a requested
