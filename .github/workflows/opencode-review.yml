@@ -52,6 +52,40 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
           persist-credentials: false
+      # A persistent self-hosted runner can cache a partial clone (promisor
+      # remote, e.g. left by another job's sparse checkout): base-side blobs
+      # are then missing and the review action's `git diff base...HEAD`
+      # lazy-fetches them with no credentials — checkout removed its helper
+      # (persist-credentials: false) — so git exits 128 and the review dies
+      # (pietervw/.github#10). Repair the cached repo: drop the promisor
+      # config and refetch every object unfiltered, so no lazy fetch is ever
+      # needed again. The token authenticates this one fetch (private repo)
+      # and is removed again on exit; the review step still never sees one.
+      - name: Ensure blob-complete checkout (partial-clone runner cache, #10)
+        shell: bash
+        env:
+          FETCH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! git config --get remote.origin.promisor >/dev/null 2>&1 \
+             && ! git config --get remote.origin.partialclonefilter >/dev/null 2>&1; then
+            echo "cached checkout is not a partial clone; nothing to repair"
+            exit 0
+          fi
+          # git fetch --refetch needs git >= 2.36; fail loudly instead of
+          # silently keeping the broken partial clone.
+          gitver="$(git --version | awk '{print $3}')"
+          if [ "$(printf '%s\n2.36\n' "$gitver" | sort -V | head -1)" != "2.36" ]; then
+            echo "::error::partial clone detected but git ${gitver} < 2.36 lacks 'fetch --refetch'; upgrade git on this runner"
+            exit 1
+          fi
+          echo "::notice::cached checkout is a partial clone; refetching all objects unfiltered (pietervw/.github#10)"
+          git config --unset-all remote.origin.promisor || true
+          git config --unset-all remote.origin.partialclonefilter || true
+          git config --local http.https://github.com/.extraheader \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "${FETCH_TOKEN}" | base64 | tr -d '\n')"
+          trap 'git config --local --unset-all http.https://github.com/.extraheader >/dev/null 2>&1 || true' EXIT
+          git fetch --quiet --refetch --no-tags origin
       - uses: pietervw/.github/.github/actions/opencode-review@v1
         with:
           api-key: ${{ secrets.ZHIPU_API_KEY }}
