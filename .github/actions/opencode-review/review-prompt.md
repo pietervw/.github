@@ -43,6 +43,25 @@ a P1 `security` finding at the place you found it.
    useful line.
 7. Produce the output described at the end.
 
+## Work budget
+
+You have about ten minutes of wall-clock time; a run that does not print the
+JSON below by then is killed and the author gets no review at all. Plan for it:
+
+- Size the diff first. For a change over roughly 15 files or 600 changed
+  lines, review by risk: auth, data access, money, migrations, workflows and
+  public API first; skim tests, snapshots, lockfiles, generated and
+  documentation files.
+- Read only what a candidate needs: the function around it, its direct callers,
+  its test. Do not read whole directories, trace call chains more than two
+  hops, or re-read a file you have already read.
+- Validate only candidates that look like P0-P2. Drop shaky P3s instead of
+  chasing them.
+- Do not start new exploration once you have used about eight minutes. Write
+  the JSON with what you have and list anything you did not get to (files,
+  lenses) under `not_verified`. A partial review that arrives beats a complete
+  one that is killed.
+
 If the change is only documentation, copy, formatting, or generated files, say
 so in the summary and return no findings unless something there is actually
 wrong (a broken link, a wrong command, a leaked secret).

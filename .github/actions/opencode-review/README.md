@@ -93,9 +93,9 @@ the action verifies but never installs the CLI), `prompt-file`,
 thresholds are environment variables on `run-review.sh`: `REVIEW_MIN_MEM_MB`
 (1536), `REVIEW_MAX_LOAD_PER_CPU` (2.5), `REVIEW_MAX_IO_FULL` (25, percent of
 IO "full" pressure over 10 s), `REVIEW_POLL_SEC` (30), `REVIEW_RUN_TIMEOUT_SEC`
-(720), `REVIEW_ATTEMPTS` (2, per model), `REVIEW_RETRY_BACKOFF_SEC` (30),
+(1200; was 720 until 2026-11-25, when glm-5.4 reviews of 20+ file PRs kept hitting it), `REVIEW_ATTEMPTS` (2, per model), `REVIEW_RETRY_BACKOFF_SEC` (30),
 `REVIEW_RETRY_IF_DIED_UNDER` (180, seconds; only attempts that fail faster
-than this are retried — a full 720 s timeout is not, to free the CI slot),
+than this are retried — a full-timeout run is not, to free the CI slot),
 `REVIEW_BREAKER_TTL` (1800, seconds the primary is skipped after a quota
 failure; 0 disables — short because a re-probe of a still-capped primary
 costs seconds and the review still completes on a fallback, while a stale
@@ -113,10 +113,10 @@ full run timeout stops the run (it already held the CI slot long enough).
 Only a quota-class failure of the primary opens the breaker.
 
 Time is bounded per model by its attempts: either one slow non-timeout
-death (just under `REVIEW_RUN_TIMEOUT_SEC`, 720) or two quick deaths
+death (just under `REVIEW_RUN_TIMEOUT_SEC`, 1200) or two quick deaths
 (< 180 s each plus 30 s backoff); a death at the full timeout exits the run
 instead of advancing. So the chain's worst case is the capacity wait
-(`wait-seconds`, 600) plus ~3 × 820 s ≈ 71 min — and the job's
+(`wait-seconds`, 600) plus ~3 × 1300 s ≈ 83 min — and the job's
 `timeout-minutes` (20 in the inlined callers) is the practical ceiling: a
 chain of slow failures presents as a job timeout, i.e. a failed run, not a
 hang. The 2100 s runner watchdog and 90-minute job timeout (which includes
